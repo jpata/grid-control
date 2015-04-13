@@ -30,23 +30,23 @@ if __name__ == '__main__':
 		utils.deprecated('This python version (%.1f) is not supported anymore!' % pyver)
 
 	parser = optparse.OptionParser(add_help_option=False)
-	parser.add_option('-h', '--help',          action='callback', callback=print_help)
+	parser.add_option('-h', '--help',	  action='callback', callback=print_help)
 	parser.add_option('',   '--help-vars',     dest='help_vars',  default=False, action='store_true')
 	parser.add_option('',   '--help-conf',     dest='help_cfg',   default=False, action='store_true')
 	parser.add_option('',   '--help-confmin',  dest='help_scfg',  default=False, action='store_true')
-	parser.add_option('-i', '--init',          dest='init',       default=False, action='store_true')
-	parser.add_option('-q', '--resync',        dest='resync',     default=False, action='store_true')
+	parser.add_option('-i', '--init',	  dest='init',       default=False, action='store_true')
+	parser.add_option('-q', '--resync',	dest='resync',     default=False, action='store_true')
 	parser.add_option('-s', '--no-submission', dest='submission', default=True,  action='store_false')
 	parser.add_option('-c', '--continuous',    dest='continuous', default=None,  action='store_true')
 	parser.add_option('-o', '--override',      dest='override',   default=[],    action='append')
-	parser.add_option('-d', '--delete',        dest='delete',     default=None)
-	parser.add_option('',   '--reset',         dest='reset',      default=None)
-	parser.add_option('-a', '--action',        dest='action',     default=None)
+	parser.add_option('-d', '--delete',	dest='delete',     default=None)
+	parser.add_option('',   '--reset',	 dest='reset',      default=None)
+	parser.add_option('-a', '--action',	dest='action',     default=None)
 	parser.add_option('-J', '--job-selector',  dest='selector',   default=None)
 	parser.add_option('-m', '--max-retry',     dest='maxRetry',   default=None,  type='int')
 	parser.add_option('-v', '--verbose',       dest='verbosity',  default=0,     action='count')
-	parser.add_option('-G', '--gui',           dest='gui',        action='store_const', const = 'ANSIConsole')
-	parser.add_option('-W', '--webserver',     dest='gui',        action='store_const', const = 'CPWebserver')
+	parser.add_option('-G', '--gui',	   dest='gui',	action='store_const', const = 'ANSIConsole')
+	parser.add_option('-W', '--webserver',     dest='gui',	action='store_const', const = 'CPWebserver')
 	Report.addOptions(parser)
 	(opts, args) = parser.parse_args()
 	utils.verbosity(opts.verbosity)
@@ -89,7 +89,8 @@ if __name__ == '__main__':
 			if not opts.init:
 				utils.vprint('Will force initialization of %s if continued!' % config.workDir, -1)
 				opts.init = True
-			if utils.getUserBool('Do you want to create the working directory %s?' % config.workDir, True):
+			#if utils.getUserBool('Do you want to create the working directory %s?' % config.workDir, True):
+			if True:
 				utils.ensureDirExists(config.workDir, 'work directory')
 		checkSpace = config.getInt('global', 'workdir space', 10, mutable=True)
 
