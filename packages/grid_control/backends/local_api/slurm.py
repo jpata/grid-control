@@ -75,13 +75,13 @@ class JMS(LocalWMS):
 			### except Exception:
 			### 	print "unable to parse id", jl
 			### 	continue
-			if not jl[5] in self._statusMap.keys():
-				#print "unable to parse status=", jl[5]
+			if not jl[2] in self._statusMap.keys():
+				#print "unable to parse status=", jl[2], sorted(list(self._statusMap.keys()))
 				continue
 
 			jobinfo["id"] = str(int(jl[0]))
-			jobinfo["queue"] = jl[2]
-			jobinfo["status"] = jl[5]
+			jobinfo["queue"] = jl[1]
+			jobinfo["status"] = jl[2]
 			#print("jobinfo=", jobinfo)
 			yield jobinfo
 
@@ -90,7 +90,7 @@ class JMS(LocalWMS):
 		#squeue
 		#return '-ho %%i,%%T -j %s' % str.join(',', wmsIds)
 		#sacct
-		a = '-n -j %s' % str.join(',', wmsIds)
+		a = '-n -o jobid,partition,state,exitcode -j %s' % str.join(',', wmsIds)
 		#print a
 		return a
 
