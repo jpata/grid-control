@@ -28,19 +28,23 @@ class LocalWMS(BasicWMS):
 
 		activity = utils.ActivityLog('checking job status')
 		proc = utils.LoggedProcess(self.statusExec, self.getCheckArguments(self._getRawIDs(ids)))
-
 		tmp = {}
+		error = False
 		for data in self.parseStatus(proc.iter()):
+			print "data", data
+			if data["status"] == "error":
+				error = True
+				break
 			wmsId = self._createId(data['id'])
 			tmp[wmsId] = (wmsId, self.parseJobState(data['status']), data)
 
-		for wmsId, jobNum in ids:
-			if wmsId not in tmp:
-				yield (jobNum, wmsId, Job.DONE, {})
-			else:
-				yield tuple([jobNum] + list(tmp[wmsId]))
-
 		retCode = proc.wait()
+		if not error:
+			for wmsId, jobNum in ids:
+				if wmsId not in tmp:
+					yield (jobNum, wmsId, Job.DONE, {})
+				else:
+					yield tuple([jobNum] + list(tmp[wmsId]))
 		del activity
 
 		if retCode != 0:

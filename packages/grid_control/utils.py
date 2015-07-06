@@ -83,10 +83,14 @@ class LoggedProcess(object):
 		self.proc = popen2.Popen3('%s %s' % (cmd, args), True)
 
 	def getOutput(self, wait = False):
+		ret = 0	
 		if wait:
-			self.wait()
+			ret = self.wait()
 		self.stdout.extend(self.proc.fromchild.readlines())
-		return str.join('', self.stdout)
+		if ret == 0:
+		    return str.join('', self.stdout)
+		else:
+		    raise Exception("error: {0}".format(str.join('', self.stdout) +"\n"+ self.getError()))
 
 	def getError(self):
 		self.stderr.extend(self.proc.childerr.readlines())

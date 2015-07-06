@@ -1,6 +1,7 @@
 import sys, os, shutil
 from grid_control import ConfigError, RethrowError, Job, utils
 from grid_control.backends import WMS, LocalWMS
+import sys
 
 class JMS(LocalWMS):
 
@@ -60,6 +61,10 @@ class JMS(LocalWMS):
 	def parseStatus(self, status):
 		#for s in status:
 		for jobline in str.join('', list(status)).split('\n'):
+			print jobline
+			if "error" in jobline.lower():
+				print "got error", jobline
+				yield {"status":"error"}
 			if jobline == '':
 				continue
 
@@ -76,13 +81,13 @@ class JMS(LocalWMS):
 			### 	print "unable to parse id", jl
 			### 	continue
 			if not jl[2] in self._statusMap.keys():
-				#print "unable to parse status=", jl[2], sorted(list(self._statusMap.keys()))
+				print "unable to parse status=", jl[2], sorted(list(self._statusMap.keys()))
 				continue
 
 			jobinfo["id"] = str(int(jl[0]))
 			jobinfo["queue"] = jl[1]
 			jobinfo["status"] = jl[2]
-			#print("jobinfo=", jobinfo)
+			print("jobinfo=", jobinfo)
 			yield jobinfo
 
 

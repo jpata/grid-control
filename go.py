@@ -208,4 +208,4 @@ if __name__ == '__main__':
 		workflow = GUI.open(guiClass, jobCycle, jobManager, module)
 		workflow.run()
 
-	handleException(main)
+	main()
