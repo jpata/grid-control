@@ -455,7 +455,7 @@ def uniqueListRL(inList): # (right to left)
 
 
 def checkVar(value, message, check = True):
-	if check and max(map(lambda x: max(x.count('@'), x.count('__')), str(value).split('\n'))) >= 2:
+	if check and max(map(lambda x: x.count('@'), str(value).split('\n'))) >= 2:
 		raise ConfigError(message)
 	return value
 
