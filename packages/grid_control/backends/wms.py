@@ -175,7 +175,7 @@ class BasicWMS(WMS):
 		retrievedJobs = []
 		failPath = os.path.join(self.config.workDir, 'fail')
 
-		for inJobNum, dir in self._getJobsOutput(ids):
+		for jobIdx, (inJobNum, dir) in enumerate(self._getJobsOutput(ids)):
 			# inJobNum != None, dir == None => Job could not be retrieved
 			if dir == None:
 				if inJobNum not in retrievedJobs:
@@ -191,6 +191,10 @@ class BasicWMS(WMS):
 			info_content = None
 			if not os.path.exists(info):
 				utils.eprint('Warning: "%s" does not exist.' % info)
+				print "Job abnormally cancelled:", inJobNum, dir, ids[jobIdx]
+				#import pdb
+				#pdb.set_trace()
+				yield (inJobNum, -1, {})
 			else:
 				try:
 					info_content = open(info, 'r').read()

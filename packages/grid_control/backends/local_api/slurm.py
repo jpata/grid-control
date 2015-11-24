@@ -61,7 +61,6 @@ class JMS(LocalWMS):
 	def parseStatus(self, status):
 		#for s in status:
 		for jobline in str.join('', list(status)).split('\n'):
-			print jobline
 			if "error" in jobline.lower():
 				print "got error", jobline
 				yield {"status":"error"}
@@ -71,6 +70,10 @@ class JMS(LocalWMS):
 			jobinfo = dict()
 
 			jl = jobline.split()
+			try:
+				jobid = int(jl[0])
+			except:
+				continue
 			#print("jobline=", jl)
 
 			#squeue
@@ -81,13 +84,13 @@ class JMS(LocalWMS):
 			### 	print "unable to parse id", jl
 			### 	continue
 			if not jl[2] in self._statusMap.keys():
-				print "unable to parse status=", jl[2], sorted(list(self._statusMap.keys()))
+				print "unable to parse status=", jl, jl[2], sorted(list(self._statusMap.keys()))
 				continue
 
 			jobinfo["id"] = str(int(jl[0]))
 			jobinfo["queue"] = jl[1]
 			jobinfo["status"] = jl[2]
-			print("jobinfo=", jobinfo)
+			#print("jobinfo=", jobinfo)
 			yield jobinfo
 
 
