@@ -12,6 +12,7 @@ class JMS(LocalWMS):
 		"COMPLETED" : Job.DONE	,# running
 		"COMPLETING" : Job.DONE	,# running
 		"CANCELLED+" : Job.ABORTED	,# removed
+		"NODE_FAIL" : Job.ABORTED	,# removed
 		"CANCELLED" : Job.ABORTED	,# removed
 		#'5' : Job.WAITING	,#DISABLED	,# on hold
 		"FAILED" : Job.FAILED	,# submit error

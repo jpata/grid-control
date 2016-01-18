@@ -151,7 +151,7 @@ class LocalWMS(BasicWMS):
 
 			# Cleanup sandbox
 			outFiles = utils.listMapReduce(lambda pat: glob.glob(os.path.join(path, pat)), self.outputFiles)
-			#utils.removeFiles(filter(lambda x: x not in outFiles, map(lambda fn: os.path.join(path, fn), os.listdir(path))))
+			utils.removeFiles(filter(lambda x: x not in outFiles, map(lambda fn: os.path.join(path, fn), os.listdir(path))))
 
 			yield (jobNum, path)
 		del activity
