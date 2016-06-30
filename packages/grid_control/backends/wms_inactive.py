@@ -34,8 +34,8 @@ class InactiveWMS(WMS):
 	def submitJobs(self, jobNumList, task): # jobNumList = [1, 2, ...]
 		self._log.warning('Discarded submission of %d jobs', len(jobNumList))
 
-	def checkJobs(self, gcID_jobNum_List): # gcID_jobNum_List = [(WMS-61226, 1), (WMS-61227, 2), ...]
-		self._log.warning('Discarded check of %d jobs', len(gcID_jobNum_List))
+	def checkJobs(self, gcIDs): # gcID_jobNum_List = [(WMS-61226, 1), (WMS-61227, 2), ...]
+		self._log.warning('Discarded check of %d jobs', len(gcIDs))
 
 	def retrieveJobs(self, gcID_jobNum_List):
 		self._log.warning('Discarded retrieval of %d jobs', len(gcID_jobNum_List))

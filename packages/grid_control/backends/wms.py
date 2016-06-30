@@ -31,6 +31,16 @@ from python_compat import imap, izip, lmap, set, sorted
 class BackendError(NestedException):
 	pass
 
+BackendJobState = makeEnum([
+	'ABORTED',   # job was aborted by the WMS
+	'CANCELLED', # job was cancelled
+	'DONE',      # job is finished
+	'QUEUED',    # job is at WMS and is assigned a place to run
+	'RUNNING',   # job is running
+	'UNKNOWN',   # job status is unknown
+	'WAITING',   # job is at WMS but was not yet assigned some place to run
+])
+
 class WMS(NamedPlugin):
 	configSections = NamedPlugin.configSections + ['wms', 'backend']
 	tagName = 'wms'
@@ -59,7 +69,7 @@ class WMS(NamedPlugin):
 	def submitJobs(self, jobNumList, task): # jobNumList = [1, 2, ...]
 		raise AbstractError # Return (jobNum, wmsId, data) for successfully submitted jobs
 
-	def checkJobs(self, gcID_jobNum_List): # gcID_jobNum_List = [(WMS-61226, 1), (WMS-61227, 2), ...]
+	def checkJobs(self, gcIDs):
 		raise AbstractError # Return (jobNum, wmsId, state, info) for active jobs
 
 	def retrieveJobs(self, gcID_jobNum_List):
@@ -81,10 +91,12 @@ class WMS(NamedPlugin):
 		for (wmsId, _) in gcID_jobNum_List:
 			yield self._splitId(wmsId)[1]
 
-	def _mapIDs(self, gcID_jobNum_List):
+	def _get_map_wmsID_gcID(self, gcIDs):
 		result = {}
-		for (gcID, _) in gcID_jobNum_List:
+		for gcID in gcIDs:
 			wmsID = self._splitId(gcID)[1]
+			if wmsID in result:
+				raise BackendError('Multiple gcIDs map to the same wmsID!')
 			result[wmsID] = gcID
 		return result
 makeEnum(['WALLTIME', 'CPUTIME', 'MEMORY', 'CPUS', 'BACKEND', 'SITES', 'QUEUES', 'SOFTWARE', 'STORAGE'], WMS)
@@ -166,27 +178,23 @@ class BasicWMS(WMS):
 			yield self._submitJob(jobNum, task)
 
 
-	# Check status of jobs and yield (jobNum, wmsID, status, other data)
-	def checkJobs(self, gcID_jobNum_List):
-		if not gcID_jobNum_List:
-			raise StopIteration
+	# Check status of jobs and yield (wmsID, status, other data)
+	def checkJobs(self, gcIDs):
+		if gcIDs:
+			activity = utils.ActivityLog('checking job status')
+			wmsID_gcID_Map = self._get_map_wmsID_gcID(gcIDs)
+			wmsIDs = list(wmsID_gcID_Map.keys())
 
-		activity = utils.ActivityLog('checking job status')
-		gcID_jobNum_Map = dict(gcID_jobNum_List)
-		wmsID_gcID_Map = self._mapIDs(gcID_jobNum_List)
-		wmsIDs = list(wmsID_gcID_Map.keys())
-
-		for (wmsID, job_status, job_info) in self._check_executor.execute(wmsIDs):
-			gcID = wmsID_gcID_Map.get(wmsID)
-			if gcID:
-				for key in CheckInfo.enumValues:
-					if key in job_info:
-						job_info[CheckInfo.enum2str(key)] = job_info.pop(key)
-				yield (gcID_jobNum_Map.pop(gcID), gcID, job_status, job_info)
-
-		for gcID in gcID_jobNum_Map:
-			yield (gcID_jobNum_Map[gcID], gcID, Job.UNKNOWN, {})
-		activity.finish()
+			for (wmsID, job_status, job_info) in self._check_executor.execute(wmsIDs):
+				gcID = wmsID_gcID_Map.pop(wmsID, None)
+				if gcID is not None:
+					for key in CheckInfo.enumValues:
+						if key in job_info:
+							job_info[CheckInfo.enum2str(key)] = job_info.pop(key)
+					yield (gcID, job_status, job_info)
+				else:
+					self._log.debug('received status information from unknown job %r' % wmsID)
+			activity.finish()
 
 
 	def retrieveJobs(self, gcID_jobNum_List): # Process output sandboxes returned by getJobsOutput

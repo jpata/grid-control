@@ -174,5 +174,5 @@ class CancelJobsWithProcess(CancelJobs):
 
 
 class PurgeJobs(BackendExecutor):
-	def execute(self):
+	def execute(self, wmsIDs):
 		pass
