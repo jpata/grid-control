@@ -14,7 +14,7 @@
 
 from grid_control import utils
 from grid_control.backends.backend_tools import CheckInfo, CheckJobsWithProcess, ProcessCreatorAppendArguments
-from grid_control.backends.wms_local import LocalWMS
+from grid_control.backends.wms_local import LocalWMS, LocalCheckJobs
 from grid_control.job_db import Job
 from python_compat import ifilter, imap, izip, lmap, next
 
@@ -49,12 +49,8 @@ class Host(LocalWMS):
 	def __init__(self, config, name):
 		LocalWMS.__init__(self, config, name,
 			submitExec = utils.pathShare('gc-host.sh'),
-			cancelExec = utils.resolveInstallPath('kill'),
-			checkExecutor = Host_CheckJobs(config))
-
-
-	def unknownID(self):
-		return 'Unknown Job Id'
+			checkExecutor = LocalCheckJobs(config, Host_CheckJobs(config)),
+			cancelExecutor = CancelJobsWithProcessBlind(config, 'kill', ['-9'], unknownID = 'No such process'))
 
 
 	def getJobArguments(self, jobNum, sandbox):
@@ -67,7 +63,3 @@ class Host(LocalWMS):
 
 	def parseSubmitOutput(self, data):
 		return data.strip()
-
-
-	def getCancelArguments(self, wmsIds):
-		return '-9 %s' % str.join(' ', wmsIds)

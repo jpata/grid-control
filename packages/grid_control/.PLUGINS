@@ -34,6 +34,8 @@
 
       * grid_control.backends.backend_tools CancelJobsWithProcess
 
+       * grid_control.backends.backend_tools CancelJobsWithProcessBlind
+
      * grid_control.backends.backend_tools CheckJobs
 
       * grid_control.backends.backend_tools CheckJobsWithProcess

@@ -69,8 +69,8 @@ class WMS(NamedPlugin):
 	def submitJobs(self, jobNumList, task): # jobNumList = [1, 2, ...]
 		raise AbstractError # Return (jobNum, wmsId, data) for successfully submitted jobs
 
-	def checkJobs(self, gcIDs):
-		raise AbstractError # Return (jobNum, wmsId, state, info) for active jobs
+	def checkJobs(self, gcIDs): # Check status and return (gcID, job_state, job_info) for active jobs
+		raise AbstractError
 
 	def retrieveJobs(self, gcID_jobNum_List):
 		raise AbstractError # Return (jobNum, retCode, data, outputdir) for retrived jobs
@@ -178,8 +178,7 @@ class BasicWMS(WMS):
 			yield self._submitJob(jobNum, task)
 
 
-	# Check status of jobs and yield (wmsID, status, other data)
-	def checkJobs(self, gcIDs):
+	def checkJobs(self, gcIDs): # Check status and return (gcID, job_state, job_info) for active jobs
 		if gcIDs:
 			activity = utils.ActivityLog('checking job status')
 			wmsID_gcID_Map = self._get_map_wmsID_gcID(gcIDs)

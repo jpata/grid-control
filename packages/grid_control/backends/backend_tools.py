@@ -99,13 +99,13 @@ class ChunkedExecutor(BackendExecutor):
 	def setup(self, log):
 		self._executor.setup(log)
 
-	def execute(self, wmsIDs):
+	def execute(self, wmsIDs, *args, **kwargs):
 		do_wait = False
 		for wmsIDChunk in imap(lambda x: wmsIDs[x:x + self._chunk_size], irange(0, len(wmsIDs), self._chunk_size)):
 			if do_wait and not utils.wait(self._chunk_time):
 				break
 			do_wait = True
-			for result in self._executor.execute(wmsIDChunk):
+			for result in self._executor.execute(wmsIDChunk, *args, **kwargs):
 				yield result
 
 
@@ -158,12 +158,12 @@ class CancelJobsWithProcess(CancelJobs):
 		self._errormsg = 'Job cancel command returned with exit code %(code)s'
 		self._proc_factory = proc_factory
 
-	def _parse(self, proc): # yield list of (wmsID, job_status)
+	def _parse(self, wmsIDs, proc): # yield list of (wmsID, job_status)
 		raise AbstractError
 
 	def execute(self, wmsIDs):
 		proc = self._proc_factory.create_proc(wmsIDs)
-		for result in self._parse(proc):
+		for result in self._parse(wmsIDs, proc):
 			if not utils.abort():
 				yield result
 		if proc.status(timeout = 0, terminate = True) != 0:
@@ -171,6 +171,22 @@ class CancelJobsWithProcess(CancelJobs):
 
 	def _handleError(self, proc):
 		self._filter_proc_log(proc, self._errormsg)
+
+
+class CancelJobsWithProcessBlind(CancelJobsWithProcess):
+	def __init__(self, config, cmd, args = None, fmt = identity, unknownID = None):
+		proc_factory = ProcessCreatorAppendArguments(config, cmd, args, fmt)
+		CancelJobsWithProcess.__init__(self, config, proc_factory)
+		self._blacklist = None
+		if unknownID is not None:
+			self._blacklist = [unknown]
+
+	def _parse(self, wmsIDs, proc): # yield list of (wmsID, job_status)
+		proc.status(self._timeout, terminate = True)
+		return wmsIDs
+
+	def _handleError(self, proc):
+		self._filter_proc_log(proc, self._errormsg, blacklist = self._blacklist)
 
 
 class PurgeJobs(BackendExecutor):

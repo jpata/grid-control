@@ -44,12 +44,12 @@ class LocalCheckJobs(CheckJobs):
 class LocalWMS(BasicWMS):
 	configSections = BasicWMS.configSections + ['local']
 
-	def __init__(self, config, name, submitExec, cancelExec, checkExecutor):
+	def __init__(self, config, name, submitExec, checkExecutor, cancelExecutor):
 		config.set('broker', 'RandomBroker')
 		config.setInt('wait idle', 20)
 		config.setInt('wait work', 5)
-		(self.submitExec, self.cancelExec) = (submitExec, cancelExec)
-		BasicWMS.__init__(self, config, name, LocalCheckJobs(config, checkExecutor))
+		self.submitExec = submitExec
+		BasicWMS.__init__(self, config, name, checkExecutor)
 
 		self.brokerSite = config.getPlugin('site broker', 'UserBroker', cls = Broker,
 			inherit = True, tags = [self], pargs = ('sites', 'sites', self.getNodes))
