@@ -13,9 +13,9 @@
 # | limitations under the License.
 
 from grid_control import utils
-from grid_control.backends.backend_tools import CheckInfo, CheckJobsWithProcess, ProcessCreatorAppendArguments, CancelJobsWithProcessBlind
+from grid_control.backends.backend_tools import CancelJobsWithProcessBlind, CheckInfo, CheckJobsWithProcess, ProcessCreatorAppendArguments
 from grid_control.backends.wms import BackendError, WMS
-from grid_control.backends.wms_local import LocalWMS, LocalCheckJobs
+from grid_control.backends.wms_local import LocalCheckJobs, LocalWMS
 from grid_control.job_db import Job
 from python_compat import identity, ifilter
 

@@ -179,7 +179,7 @@ class CancelJobsWithProcessBlind(CancelJobsWithProcess):
 		CancelJobsWithProcess.__init__(self, config, proc_factory)
 		self._blacklist = None
 		if unknownID is not None:
-			self._blacklist = [unknown]
+			self._blacklist = [unknownID]
 
 	def _parse(self, wmsIDs, proc): # yield list of (wmsID, job_status)
 		proc.status(self._timeout, terminate = True)

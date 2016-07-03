@@ -94,7 +94,7 @@ class JobManager(NamedPlugin):
 			self._log_user_time.debug('Please refer to %s for a complete list of disabled jobs.', self._disabled_jobs_logfile)
 
 
-	def _update(self, jobObj, jobNum, state, showWMS = False):
+	def _update(self, jobObj, jobNum, state, showWMS = False, message = None):
 		if jobObj.state == state:
 			return
 
@@ -104,6 +104,8 @@ class JobManager(NamedPlugin):
 
 		jobNumLen = int(math.log10(max(1, len(self.jobDB))) + 1)
 		jobStatus = ['Job %s state changed from %s to %s ' % (str(jobNum).ljust(jobNumLen), Job.enum2str(oldState), Job.enum2str(state))]
+		if message is not None:
+			jobStatus.append(message)
 		if showWMS and jobObj.wmsId:
 			jobStatus.append('(WMS:%s)' % jobObj.wmsId.split('.')[1])
 		if (state == Job.SUBMITTED) and (jobObj.attempt > 1):

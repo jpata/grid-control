@@ -20,7 +20,6 @@ from grid_control.backends.access import AccessToken
 from grid_control.backends.backend_tools import CheckInfo
 from grid_control.backends.storage import StorageManager
 from grid_control.gc_plugin import NamedPlugin
-from grid_control.job_db import Job
 from grid_control.output_processor import JobResult
 from grid_control.utils.data_structures import makeEnum
 from grid_control.utils.file_objects import SafeFile, VirtualFile
@@ -192,7 +191,7 @@ class BasicWMS(WMS):
 							job_info[CheckInfo.enum2str(key)] = job_info.pop(key)
 					yield (gcID, job_status, job_info)
 				else:
-					self._log.debug('received status information from unknown job %r' % wmsID)
+					self._log.debug('received status information from unknown job %r', wmsID)
 			activity.finish()
 
 

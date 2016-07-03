@@ -14,7 +14,7 @@
 
 import os, xml.dom.minidom
 from grid_control import utils
-from grid_control.backends.backend_tools import CheckInfo, CheckJobsWithProcess, ProcessCreatorViaArguments
+from grid_control.backends.backend_tools import CancelJobsWithProcessBlind, CheckInfo, CheckJobsWithProcess, ProcessCreatorViaArguments
 from grid_control.backends.wms import BackendError, WMS
 from grid_control.backends.wms_local import LocalCheckJobs
 from grid_control.backends.wms_pbsge import PBSGECommon
