@@ -65,16 +65,16 @@ source "$GC_SCRATCH/_config.sh"
 
 # Monitor space usage
 echo $$ > $GC_MARKER
-if [ -n "$(getrealdir $GC_SCRATCH | grep $(getrealdir $GC_LANDINGZONE))" ]; then
-	echo "\$GC_SCRATCH is a subdirectory of \$GC_LANDINGZONE"; echo
-	# Landing zone: Used space < 5Gb && Free space > 1Gb (using limits on the scratch directory)
-	monitordirlimits "SCRATCH" $GC_LANDINGZONE &
-else
-	# Landing zone: Used space < 50Mb && Free space > 100Mb
-	monitordirlimits "LANDINGZONE" "$GC_LANDINGZONE" &
-	# Landing zone: Used space < 5Gb && Free space > 1Gb
-	monitordirlimits "SCRATCH" "$GC_SCRATCH" &
-fi
+#if [ -n "$(getrealdir $GC_SCRATCH | grep $(getrealdir $GC_LANDINGZONE))" ]; then
+#	echo "\$GC_SCRATCH is a subdirectory of \$GC_LANDINGZONE"; echo
+#	# Landing zone: Used space < 5Gb && Free space > 1Gb (using limits on the scratch directory)
+#	monitordirlimits "SCRATCH" $GC_LANDINGZONE &
+#else
+#	# Landing zone: Used space < 50Mb && Free space > 100Mb
+#	#monitordirlimits "LANDINGZONE" "$GC_LANDINGZONE" &
+#	# Landing zone: Used space < 5Gb && Free space > 1Gb
+#	monitordirlimits "SCRATCH" "$GC_SCRATCH" &
+#fi
 
 echo "Unpacking environment"
 tar xvfz "$GC_LANDINGZONE/gc-sandbox.tar.gz" -C "$GC_SCRATCH" || fail 105
