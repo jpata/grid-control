@@ -225,19 +225,19 @@ getscratch() {
 	}
 
 	getscratch_internal GC_SCRATCH && return 0
-	getscratch_internal GC_LOCALSCRATCH && return 0
-	getscratch_internal GC_LANDINGZONE && return 0
-	getscratch_internal LOCAL_SCRATCH NODE_SCRATCH USER_SCRATCH EDG_WL_SCRATCH OSG_WN_TMP LCG_TMP DG_WL_SCRATCH && return 0
+	#getscratch_internal GC_LOCALSCRATCH && return 0
+	#getscratch_internal GC_LANDINGZONE && return 0
+	#getscratch_internal LOCAL_SCRATCH NODE_SCRATCH USER_SCRATCH EDG_WL_SCRATCH OSG_WN_TMP LCG_TMP DG_WL_SCRATCH && return 0
 
 	echo "Site doesn't define scratch directory variables! Trying other locations..." 1>&2
 	export 1>&2
 
 	# FAIL or continue?
 	#fail 123
-	getscratch_internal GC_LANDINGZONE && return 0
+	#getscratch_internal GC_LANDINGZONE && return 0
 
-	export GC_TMP="/tmp"
-	getscratch_internal HOME TMPDIR GC_TMP && return 0
+	#export GC_TMP="/tmp"
+	#getscratch_internal HOME TMPDIR GC_TMP && return 0
 
 	fail 102
 }
@@ -358,19 +358,19 @@ monitordirlimits() {
 	[ "$1" == "SCRATCH" ] && DEFAULT_UL=50 || DEFAULT_UL=100
 	while [ -f "$GC_MARKER" ]; do
 		[ -z "$MDL_CFG" -a -f "$GC_SCRATCH/_config.sh" ] && source "$GC_SCRATCH/_config.sh" && MDL_CFG="set"
-		DISKSPACE="`getdiskspace $2`"
-		if [ $DISKSPACE -lt ${!LIMIT_LL:-$DEFAULT_LL} ]; then
-			echo "Lower space limit reached on $2 ($DISKSPACE < ${!LIMIT_LL:-$DEFAULT_LL})" 1>&2
-			updatejobinfo 120
-			kill -SIGTERM $$
-		fi
-		DISKUSAGE="`getdiskusage $2`"
-		if [ $DISKUSAGE -gt ${!LIMIT_UL:-$DEFAULT_UL} ]; then
-			echo "Upper space limit reached on $2 ($DISKUSAGE > ${!LIMIT_UL:-$DEFAULT_UL})" 1>&2
-			updatejobinfo 121
-			kill -SIGTERM $$
-		fi
-		sleep 20;
+		#DISKSPACE="`getdiskspace $2`"
+		#if [ $DISKSPACE -lt ${!LIMIT_LL:-$DEFAULT_LL} ]; then
+		#	echo "Lower space limit reached on $2 ($DISKSPACE < ${!LIMIT_LL:-$DEFAULT_LL})" 1>&2
+		#	updatejobinfo 120
+		#	kill -SIGTERM $$
+		#fi
+		#DISKUSAGE="`getdiskusage $2`"
+		#if [ $DISKUSAGE -gt ${!LIMIT_UL:-$DEFAULT_UL} ]; then
+		#	echo "Upper space limit reached on $2 ($DISKUSAGE > ${!LIMIT_UL:-$DEFAULT_UL})" 1>&2
+		#	updatejobinfo 121
+		#	kill -SIGTERM $$
+		#fi
+		#sleep 20;
 	done
 }
 
