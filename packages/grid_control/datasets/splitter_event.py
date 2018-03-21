@@ -4,7 +4,7 @@
 # | you may not use this file except in compliance with the License.
 # | You may obtain a copy of the License at
 # |
-# |     http://www.apache.org/licenses/LICENSE-2.0
+# |	 http://www.apache.org/licenses/LICENSE-2.0
 # |
 # | Unless required by applicable law or agreed to in writing, software
 # | distributed under the License is distributed on an "AS IS" BASIS,
@@ -46,8 +46,10 @@ class EventBoundarySplitter(DataSplitter):
 		fi_iter = iter(fi_list)
 		proto_partition = {DataSplitter.Skipped: 0, DataSplitter.NEntries: 0, DataSplitter.FileList: []}
 		while True:
+			print "pre", event_current, event_prev, event_next, event_succ
 			if event_current >= event_prev:
 				fi = next(fi_iter, None)
+				print "yielding next file", fi
 				if fi is None:
 					if proto_partition[DataSplitter.FileList]:
 						yield proto_partition
@@ -61,6 +63,7 @@ class EventBoundarySplitter(DataSplitter):
 				event_prev = event_current + event_count
 				skip_current = 0
 
+			#Last event in file
 			if event_next >= event_prev:
 				event_current = event_prev
 				continue
@@ -71,7 +74,9 @@ class EventBoundarySplitter(DataSplitter):
 			available = event_prev - event_current
 			if event_succ - event_next < available:
 				available = event_succ - event_next
-
+			else:
+				event_succ = event_next + available
+				print "partial completion", event_succ
 			if not proto_partition[DataSplitter.FileList]:
 				proto_partition[DataSplitter.Skipped] = skip_current
 
@@ -82,7 +87,12 @@ class EventBoundarySplitter(DataSplitter):
 			if DataProvider.Metadata in fi:
 				proto_partition.setdefault(DataSplitter.Metadata, []).append(fi[DataProvider.Metadata])
 
+			print "post", event_current, event_prev, event_next, event_succ
 			if event_next >= event_succ:
 				event_succ += events_per_job
+				print "yielding", proto_partition
+				if len(proto_partition[DataSplitter.FileList]) != 1:
+					import pdb
+					pdb.set_trace()
 				yield proto_partition
 				proto_partition = {DataSplitter.Skipped: 0, DataSplitter.NEntries: 0, DataSplitter.FileList: []}
