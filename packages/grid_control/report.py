@@ -77,6 +77,10 @@ class NullReport(Report):
 	alias_list = ['null']
 
 	def show_report(self, job_db, jobnum_list):
+		for jobnum in jobnum_list:
+			job_obj = job_db.get_job_transient(jobnum)
+			job_dict = job_obj.get_dict_full()
+			print jobnum, job_dict["status"], job_dict.get("jat_start_time", None), job_dict.get("wn", None), job_dict.get("runtime", None), job_dict.get("attempt", None)
 		pass
 
 
