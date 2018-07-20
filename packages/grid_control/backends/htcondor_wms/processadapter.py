@@ -1,4 +1,4 @@
-# | Copyright 2014-2016 Karlsruhe Institute of Technology
+# | Copyright 2014-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@
 import atexit
 import os
 
+
 # standard modules
 import logging
 import re
@@ -26,19 +27,22 @@ import socket
 import tempfile
 import time
 
+
 # GC modules
+from grid_control.backends.logged_process import LoggedProcess
 from grid_control.backends.wms import BackendError
 from grid_control.gc_exceptions import InstallationError
-from grid_control.utils import LoggedProcess, ensureDirExists, resolveInstallPath
+from grid_control.utils import ensure_dir_exists, resolve_install_path
 from hpfwk import AbstractError, Plugin
 from python_compat import irange, lru_cache
+
 
 # Container to call commands in a generic fashion
 class CommandContainer(object):
 	def __init__(self, command, args = lambda **kwargs: '', niceCommand = None, niceArg = None):
 		self.cmd     = command
 		self.args    = args
-		self.niceCmd = niceCommand or (lambda **kwargs: command)
+		self.nice_cmd = niceCommand or (lambda **kwargs: command)
 		self.niceArg = niceArg or args
 
 # Classes providing methods for interaction with other systems
@@ -103,7 +107,7 @@ class ProcessAdapterInterface(Plugin):
 	# python internals
 	def __init__(self, URI, **kwargs):
 		self.URI=URI
-		self._errorLog = kwargs.get('errorLog')
+		self.error_log_fn = kwargs.get('errorLog')
 		self._initLogger(**kwargs)
 		self._log(logging.INFO1, 'Establishing process adapter of type %s' % self.__class__.__name__)
 	def __enter__(self):
@@ -111,7 +115,7 @@ class ProcessAdapterInterface(Plugin):
 	def __exit__(self, exc_type, exc_value, traceback):
 		raise NotImplementedError
 	# public interfaces
-	def LoggedExecute(self, command, args = '', niceCmd = None, niceArgs = None):
+	def LoggedExecute(self, command, args = '', nice_cmd = None, nice_args = None):
 		"""Execute a command via the adapter shell"""
 		raise AbstractError
 	def LoggedGet(self, source, destination):
@@ -144,7 +148,7 @@ class ProcessAdapterInterface(Plugin):
 		if not path.startswith("/") and self._basepath:
 			abspath = self._basepath + "/" + abspath
 		return abspath
-	getDomainAbsPath = lru_cache(getDomainAbsPath)
+	getDomainAbsPath = lru_cache()(getDomainAbsPath)
 	def getGlobalAbsPath(self, path):
 		"""Translate any path to an absolute one in the executing GC domain"""
 		raise AbstractError
@@ -177,10 +181,10 @@ class ProcessAdapterInterface(Plugin):
 		stdProcess = self.LoggedExecute( "echo stdout; echo stderr >&2; exit 0" )
 		for proc in [ testProcess, stdProcess]:
 			if proc.wait() != os.EX_OK:
-				if self._errorLog:
-					proc.logError(self._errorLog)
+				if self.error_log_fn:
+					proc.log_error(self.error_log_fn)
 				raise BackendError("Failure when validating connection to '%s'." % self.getDomain)
-		if len(testProcess.getOutput()) != 0 or stdProcess.getOutput() != "stdout\n":
+		if len(testProcess.get_output()) != 0 or stdProcess.get_output() != "stdout\n":
 			raise InstallationError("Output of processes from adapter for URI '%s' is either muted or poluted." %  self.URI )
 
 
@@ -198,17 +202,17 @@ class LocalProcessAdapter(ProcessAdapterInterface):
 	def __exit__(self, exc_type, exc_value, traceback):
 		pass
 
-	def LoggedExecute(self, command, args = '', niceCmd = None, niceArgs = None):
-		return LoggedProcess(command, args = args, niceCmd = niceCmd or command, niceArgs = niceArgs or args)
+	def LoggedExecute(self, command, args = '', nice_cmd = None, nice_args = None):
+		return LoggedProcess(command, args = args, nice_cmd = nice_cmd or command, nice_args = nice_args or args)
 
 	def LoggedGet(self, source, destination):
-		return LoggedProcess(self._copy.cmd, self._copy.args(source=source, destination=destination), niceCmd = self._copy.niceCmd())
+		return LoggedProcess(self._copy.cmd, self._copy.args(source=source, destination=destination), nice_cmd = self._copy.nice_cmd())
 
 	def LoggedPut(self, source, destination):
 		return LoggedGet(self, destination, source)
 
 	def LoggedDelete(self, target):
-		return LoggedProcess(self._delete.cmd, self._delete.args(target=target), niceCmd = self._delete.niceCmd())
+		return LoggedProcess(self._delete.cmd, self._delete.args(target=target), nice_cmd = self._delete.nice_cmd())
 
 	def getDomain(self):
 		return "localhost"
@@ -248,17 +252,17 @@ class LocalProcessAdapter(ProcessAdapterInterface):
 
 	def _initInterfaces(self, **kwargs):
 		try:
-			copypath=resolveInstallPath("rsync")
+			copypath=resolve_install_path("rsync")
 			copynice=lambda **kwargs: "copy via rsync"
 		except InstallationError:
-			copypath=resolveInstallPath("cp")
+			copypath=resolve_install_path("cp")
 			copynice=lambda **kwargs: "copy via cp"
 		self._copy = CommandContainer(
 			copypath,
 			lambda **kwargs: "-r %s %s"  % (kwargs['source'], kwargs['destination']),
 			copynice)
 		self._delete = CommandContainer(
-			resolveInstallPath("rm"),
+			resolve_install_path("rm"),
 			lambda *kwargs : "-r " + kwargs['target'],
 			lambda **kwargs : "rm")
 
@@ -294,7 +298,7 @@ class SSHProcessAdapter(ProcessAdapterInterface):
 		atexit.register(self.__exit__, None, None, None)
 		# test connection once before usage
 		self._validateConnection()
-		self._basepath = self._basepath or self.LoggedExecute( "pwd" ).getOutput().strip()
+		self._basepath = self._basepath or self.LoggedExecute( "pwd" ).get_output().strip()
 	def __enter__(self):
 		self
 	def __exit__(self, exc_type, exc_value, traceback):
@@ -307,15 +311,15 @@ class SSHProcessAdapter(ProcessAdapterInterface):
 		shutil.rmtree(self._socketDir)
 
 	# Logged Processes
-	def LoggedExecute(self, command, args = '', niceCmd = None, niceArgs = None):
+	def LoggedExecute(self, command, args = '', nice_cmd = None, nice_args = None):
 		return LoggedProcess(
 			self._exeWrapper.cmd,
 			args = self._exeWrapper.args(
 				command = command,
 				args    = args
 				),
-			niceCmd  = self._exeWrapper.niceCmd(command=(niceCmd or command)),
-			niceArgs = self._exeWrapper.niceArg(args=(niceArgs or args)),
+			nice_cmd  = self._exeWrapper.nice_cmd(command=(nice_cmd or command)),
+			nice_args = self._exeWrapper.niceArg(args=(nice_args or args)),
 			shell    = False,
 			)
 
@@ -326,8 +330,8 @@ class SSHProcessAdapter(ProcessAdapterInterface):
 				source=self.getGlobalAbsPath(source),
 				destination=destination
 				),
-			niceCmd  = self._copy.niceCmd(),
-			niceArgs = self._copy.niceArg(
+			nice_cmd  = self._copy.nice_cmd(),
+			nice_args = self._copy.niceArg(
 				source=self.getGlobalAbsPath(source),
 				destination=destination
 				),
@@ -341,8 +345,8 @@ class SSHProcessAdapter(ProcessAdapterInterface):
 				source=source,
 				destination=self.getGlobalAbsPath(destination)
 				),
-			niceCmd  = self._copy.niceCmd(),
-			niceArgs = self._copy.niceArg(
+			nice_cmd  = self._copy.nice_cmd(),
+			nice_args = self._copy.niceArg(
 				source=source,
 				destination=self.getGlobalAbsPath(destination)
 				),
@@ -353,8 +357,8 @@ class SSHProcessAdapter(ProcessAdapterInterface):
 		return LoggedProcess(
 			self._delete.cmd,
 			self._delete.args({ "target" : target }),
-			niceCmd  = self._delete.niceCmd(),
-			niceArgs = self._delete.niceArg({ "target" : target }),
+			nice_cmd  = self._delete.nice_cmd(),
+			nice_args = self._delete.niceArg({ "target" : target }),
 			shell    = False,
 			)
 
@@ -369,12 +373,12 @@ class SSHProcessAdapter(ProcessAdapterInterface):
 			return _cachedURI[self]
 		except KeyError:
 			_cachedURI[self] = None
-			remoteHostname = self.LoggedExecute('hostname').getOutput(wait=True).strip()
+			remote_hostname = self.LoggedExecute('hostname').get_output(wait=True).strip()
 			localHostname  = socket.gethostname().strip()
-			remoteAdress   = socket.gethostbyname(remoteHostname)
+			remoteAdress   = socket.gethostbyname(remote_hostname)
 			localAdress    = socket.gethostbyname(localHostname)
-			self._log(logging.DEBUG1, "'Checking host/IP for loopback - local: '%s/%s', remote: '%s/%s'" % (localHostname, localAdress, remoteHostname, remoteAdress) )
-			if socket.gethostbyname(remoteHostname) == socket.gethostbyname(localHostname):
+			self._log(logging.DEBUG1, "'Checking host/IP for loopback - local: '%s/%s', remote: '%s/%s'" % (localHostname, localAdress, remote_hostname, remoteAdress) )
+			if socket.gethostbyname(remote_hostname) == socket.gethostbyname(localHostname):
 				_cachedURI[self] = LocalProcessAdapter.createURI({
 					'user' : self._user,
 					'host' : self._host,
@@ -383,15 +387,15 @@ class SSHProcessAdapter(ProcessAdapterInterface):
 					})
 			return _cachedURI[self]
 
-	def LoggedSocket(self, command="", args = '', niceCmd = None, niceArgs = None):
+	def LoggedSocket(self, command="", args = '', nice_cmd = None, nice_args = None):
 		return LoggedProcess(
 			self._socketWrapper.cmd,
 			args = self._socketWrapper.args(
 				command = command,
 				args    = args
 				),
-			niceCmd = self._socketWrapper.niceCmd(command=(niceCmd or command)),
-			niceArgs = self._exeWrapper.niceArg(args=(niceArgs or args)),
+			nice_cmd = self._socketWrapper.nice_cmd(command=(nice_cmd or command)),
+			nice_args = self._exeWrapper.niceArg(args=(nice_args or args)),
 			shell    = False,
 			)
 
@@ -424,7 +428,7 @@ class SSHProcessAdapter(ProcessAdapterInterface):
 			return [ arg for arg in argList if arg ]
 		portArgs = lambda key : self._port and "-%s%s"%(key, self._port) or ""
 		self._exeWrapper = CommandContainer(
-			resolveInstallPath("ssh"),
+			resolve_install_path("ssh"),
 			lambda **kwargs: makeArgList(
 				self._getDefaultArgs(),
 				self._getValidSocketArgs(),
@@ -439,7 +443,7 @@ class SSHProcessAdapter(ProcessAdapterInterface):
 			lambda **kwargs: kwargs.get('args') and "Arguments: '%s'" % kwargs.get('args') or ''
 			)
 		self._copy = CommandContainer(
-			resolveInstallPath("scp"),
+			resolve_install_path("scp"),
 			lambda **kwargs: makeArgList(
 				self._getDefaultArgs(),
 				self._getValidSocketArgs(),
@@ -453,7 +457,7 @@ class SSHProcessAdapter(ProcessAdapterInterface):
 			lambda **kwargs: "Transfer: '%(source)' -> '%(destination)'" % kwargs,
 			)
 		self._delete = CommandContainer(
-			resolveInstallPath("ssh"),
+			resolve_install_path("ssh"),
 			lambda **kwargs: makeArgList(
 				self._getDefaultArgs(),
 				self._getValidSocketArgs(),
@@ -465,7 +469,7 @@ class SSHProcessAdapter(ProcessAdapterInterface):
 			lambda **kwargs: "Target: '%(target)s'" % kwargs,
 			)
 		self._socketWrapper = CommandContainer(
-			resolveInstallPath("ssh"),
+			resolve_install_path("ssh"),
 			lambda **kwargs: makeArgList(
 				self._getDefaultArgs(),
 				self._getCurrentSocketArgs(),
@@ -491,7 +495,7 @@ class SSHProcessAdapter(ProcessAdapterInterface):
 		# sockets should reside in secure, managed directory
 		if kwargs.get("socketDir","") and len(kwargs.get("socketDir")) < 105:
 			self._socketDir = kwargs.get("socketDir")
-			ensureDirExists(self._socketDir, name = "SSH connection socket container directory")
+			ensure_dir_exists(self._socketDir, name = "SSH connection socket container directory")
 		else:
 			self._socketDir = tempfile.mkdtemp()
 		self._log(logging.DEBUG1, 'Using socket directoy %s' % self._socketDir)
@@ -541,16 +545,16 @@ class SSHProcessAdapter(ProcessAdapterInterface):
 		while not os.path.exists(self._getCurrentSocket()):
 			if socketProcess.poll() > 0:
 				self._log(logging.DEBUG1, "Failure on ControlMaster socket creation [code: %s]."%socketProcess.poll())
-				if self._errorLog:
-					socketProcess.logError(self._errorLog)
+				if self.error_log_fn:
+					socketProcess.log_error(self.error_log_fn)
 				return False
 			time.sleep(0.5)
 			waitTime += 0.5
 			if waitTime == timeout:
 				self._log(logging.DEBUG1, "Timeout (%ds) on ControlMaster socket creation." % timeout)
 				socketProcess.kill()
-				if self._errorLog:
-					socketProcess.logError(self._errorLog)
+				if self.error_log_fn:
+					socketProcess.log_error(self.error_log_fn)
 				return False
 		self._socketProcs[self._getCurrentSocket()] = socketProcess
 		return True
@@ -564,7 +568,7 @@ class SSHProcessAdapter(ProcessAdapterInterface):
 	def getGlobalAbsPath(self, path):
 		abspath = (self._user and self._user+"@" or "") + self._host + ":" + self.getDomainAbsPath(path)
 		return abspath
-	getGlobalAbsPath = lru_cache(getGlobalAbsPath)
+	getGlobalAbsPath = lru_cache()(getGlobalAbsPath)
 
 # Access via GSISSH
 class GSISSHProcessAdapter(SSHProcessAdapter):
@@ -572,7 +576,7 @@ class GSISSHProcessAdapter(SSHProcessAdapter):
 		return "gsissh"
 	def _initInterfaces(self, **kwargs):
 		self._exeWrapper = CommandContainer(
-			resolveInstallPath("gsissh"),
+			resolve_install_path("gsissh"),
 			lambda **kwargs: "%(port)s %(sshargs)s %(socketArgs)s %(host)s %(payload)s"  % {
 				"port"       : (self._port and "-p"+self._port or ""),
 				"sshargs"    : self._getDefaultArgs(),
@@ -586,7 +590,7 @@ class GSISSHProcessAdapter(SSHProcessAdapter):
 				},
 			)
 		self._copy = CommandContainer(
-			resolveInstallPath("gsiscp"),
+			resolve_install_path("gsiscp"),
 			lambda **kwargs: "%(sshargs)s %(socketArgs)s -r %(port)s %(source)s %(port)s %(destination)s"  % {
 				"port"       : (self._port and "-P"+self._port or ""),
 				"sshargs"    : self._getDefaultArgs(),
@@ -597,7 +601,7 @@ class GSISSHProcessAdapter(SSHProcessAdapter):
 			lambda **kwargs: "gsiscp"
 			)
 		self._delete = CommandContainer(
-			resolveInstallPath("gsissh"),
+			resolve_install_path("gsissh"),
 			lambda **kwargs: "%(port)s %(sshargs)s %(socketArgs)s %(payload)s"  % {
 				"port"    : (self._port and "-p"+self._port or ""),
 				"sshargs" : self._getDefaultArgs(),
@@ -607,7 +611,7 @@ class GSISSHProcessAdapter(SSHProcessAdapter):
 			lambda **kwargs: "'rm' via gsissh"
 			)
 		self._socketWrapper = CommandContainer(
-			resolveInstallPath("gsissh"),
+			resolve_install_path("gsissh"),
 			lambda **kwargs: "%(port)s %(sshargs)s %(socketArgs)s %(host)s %(payload)s"  % {
 				"port"       : (self._port and "-p"+self._port or ""),
 				"sshargs"    : self._getDefaultArgs(),

@@ -1,4 +1,4 @@
-# | Copyright 2013-2016 Karlsruhe Institute of Technology
+# | Copyright 2013-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -13,174 +13,110 @@
 # | limitations under the License.
 
 import os, logging
-from grid_control.utils.parsing import parseJSON
-from hpfwk import AbstractError, NestedException
-from python_compat import bytes2str, identity, json, str2bytes, urllib2
+from grid_control.utils.data_structures import make_enum
+from grid_control.utils.parsing import parse_json
+from hpfwk import AbstractError, NestedException, Plugin, clear_current_exception, ignore_exception
+from python_compat import identity, json, resolve_fun
 
-try:
-	from urllib import urlencode
-except Exception:
-	from urllib.parse import urlencode
 
 class RestError(NestedException):
 	pass
 
 
-class RestClientBase(object):
-	def __init__(self, cert = None, url = None, default_headers = None,
-			process_result = None, process_data = None,
-			rf_get = None, rf_post = None, rf_put = None, rf_delete = None):
+class RestClient(object):
+	def __init__(self, cert=None, url=None, default_headers=None,
+			process_result=None, process_data=None, session=None):
 		self._log = logging.getLogger('webservice')
-		(self._cert, self._url, self._headers) = (cert, url, default_headers)
-		(self._rf_get, self._rf_post, self._rf_put, self._rf_delete) = (rf_get, rf_post, rf_put, rf_delete)
-		(self._process_result, self._process_data) = (process_result or identity, process_data or urlencode)
+		(self._cert, self._url, self._headers, self._session) = (cert, url, default_headers, session)
+		self._process_result = process_result or identity
+		self._process_data = process_data or resolve_fun('urllib.parse:urlencode', 'urllib:urlencode')
+		if not session:
+			try:
+				self._session = RestSession.create_instance('RequestsSession')
+				# pulling in incompatible dependencies can cause many different types of exceptions
+			except Exception:
+				clear_current_exception()
+				self._session = RestSession.create_instance('Urllib2Session')
 
-	def _get_headers(self, headers):
-		request_headers = dict(self._headers or {})
-		request_headers.update(headers or {})
-		return request_headers
+	def delete(self, url=None, api=None, headers=None, params=None):
+		return self._process_result(self._request(RestSession.DELETE, url, api, headers, params=params))
 
-	def _get_url(self, url, api):
+	def get(self, url=None, api=None, headers=None, params=None):
+		return self._process_result(self._request(RestSession.GET, url, api, headers, params=params))
+
+	def post(self, url=None, api=None, headers=None, data=None):
+		if data and (self._process_data != identity):
+			data = self._process_data(data)
+		return self._process_result(self._request(RestSession.POST, url, api, headers, data=data))
+
+	def put(self, url=None, api=None, headers=None, params=None, data=None):
+		if data and (self._process_data != identity):
+			data = self._process_data(data)
+		request_result = self._request(RestSession.PUT, url, api, headers, params=params, data=data)
+		return self._process_result(request_result)
+
+	def _request(self, mode, url, api, headers, params=None, data=None):
+		header_dict = dict(self._headers or {})
+		header_dict.update(headers or {})
 		if url is None:
 			url = self._url
 		if api:
 			url += '/%s' % api
-		return url
+		try:
+			return self._session.request(mode, url=url, headers=header_dict,
+				params=params, data=data, cert=self._cert)
+		except Exception:
+			raise RestError('Unable to query %r (params: %r, cert: %r, session: %r)' %
+				(url, params, self._cert, self._session.__class__.__name__))
 
-	def _request(self, request_fun, url, api, headers, params = None, data = None):
+
+class RestSession(Plugin):
+	def request(self, mode, url, headers, params=None, data=None, cert=None):
 		raise AbstractError
 
-	def get(self, url = None, api = None, headers = None, params = None):
-		return self._process_result(self._request(self._rf_get, url, api, headers, params = params))
-
-	def post(self, url = None, api = None, headers = None, data = None):
-		if data and (self._process_data != identity):
-			data = self._process_data(data)
-		return self._process_result(self._request(self._rf_post, url, api, headers, data = data))
-
-	def put(self, url = None, api = None, headers = None, params = None, data = None):
-		if data and (self._process_data != identity):
-			data = self._process_data(data)
-		return self._process_result(self._request(self._rf_put, url, api, headers, params = params, data = data))
-
-	def delete(self, url = None, api = None, headers = None, params = None):
-		return self._process_result(self._request(self._rf_delete, url, api, headers, params = params))
-
-
-class RequestsRestClient(RestClientBase):
-	_session = None
-
-	def __init__(self, cert = None, url = None, default_headers = None, process_result = None, process_data = None):
-		if not self._session:
-			#disable ssl ca verification errors
-			requests.packages.urllib3.disable_warnings()
-			self._session = requests.Session()
-		RestClientBase.__init__(self, cert = cert, url = url, default_headers = default_headers,
-			process_result = process_result, process_data = process_data,
-			rf_get = self._session.get, rf_post = self._session.post,
-			rf_put = self._session.put, rf_delete = self._session.delete)
-
-	def _request(self, request_fun, url, api, headers, params = None, data = None):
-		request_headers = self._get_headers(headers)
-		response = request_fun(url = self._get_url(url, api), verify = False,
-			cert = self._cert, headers = request_headers, params = params, data = data)
-		try:
-			response.raise_for_status()
-		except Exception:
-			raise RestError('Request result: %s' % response.text)
-		return response.text
-
-
-class Urllib2RestClient(RestClientBase):
-	def __init__(self, cert = None, url = None, default_headers = None, process_result = None, process_data = None):
-		RestClientBase.__init__(self, cert = cert, url = url, default_headers = default_headers,
-			process_result = process_result, process_data = process_data,
-			rf_get = lambda: 'GET', rf_post = lambda: 'POST',
-			rf_put = lambda: 'PUT', rf_delete = lambda: 'DELETE')
-
-		class HTTPSClientAuthHandler(HTTPSHandler):
-			def https_open(self, req):
-				return self.do_open(self.getConnection, req)
-			def getConnection(self, host, timeout = None):
-				return HTTPSConnection(host, key_file = cert, cert_file = cert)
-		self._https_handler = HTTPSClientAuthHandler
-
-	def _request(self, request_fun, url, api, headers, params = None, data = None):
-		url = self._get_url(url, api)
-		if params:
-			url += '?%s' % urlencode(params)
-		request_headers = self._get_headers(headers)
-		if data:
-			data = str2bytes(data)
-		request = Request(url = url, data = data, headers = request_headers)
-		request.get_method = request_fun
-		if self._cert:
-			cert_handler = self._https_handler()
-			opener = build_opener(cert_handler)
-		else:
-			opener = build_opener()
-		return bytes2str(opener.open(request).read())
-
-try:
-	import requests
-	RestClient = RequestsRestClient
-except Exception: # incompatible dependencies pulled in can cause many types of exceptions
-	try:
-		import ssl # fix ca verification error in Python 2.7.9
-		if hasattr(ssl, '_create_unverified_context'):
-			setattr(ssl, '_create_default_https_context', getattr(ssl, '_create_unverified_context'))
-	except Exception:
-		pass
-	try:
-		from http.client import HTTPSConnection
-		from urllib.request import HTTPSHandler, Request, build_opener
-	except Exception:
-		from httplib import HTTPSConnection
-		HTTPSHandler = urllib2.HTTPSHandler
-		Request = urllib2.Request
-		build_opener = urllib2.build_opener
-	RestClient = Urllib2RestClient # fall back to urllib2
+make_enum(['GET', 'PUT', 'POST', 'DELETE'], RestSession)
 
 
 class JSONRestClient(RestClient):
-	def __init__(self, cert = None, url = None, default_headers = None, process_result = None):
+	def __init__(self, cert=None, url=None, default_headers=None, process_result=None):
 		RestClient.__init__(self, cert, url,
 			default_headers or {'Content-Type': 'application/json', 'Accept': 'application/json'},
-			process_result = process_result or self._process_json_result, process_data = json.dumps)
+			process_result=process_result or self._process_json_result, process_data=json.dumps)
 
 	def _process_json_result(self, value):
+		if not value:
+			raise RestError('Received empty reply')
 		try:
-			return parseJSON(value)
+			return parse_json(value)
 		except Exception:
-			if not value:
-				raise RestError('Received empty reply')
 			raise RestError('Received invalid JSON reply: %r' % value)
 
 
 class GridJSONRestClient(JSONRestClient):
-	def __init__(self, url = None, cert_errror_msg = '', cert_errror_cls = Exception, cert = None):
-		(self._cert_errror_msg, self._cert_errror_cls) = (cert_errror_msg, cert_errror_cls)
-		if cert is None:
-			cert = os.environ.get('X509_USER_PROXY', '')
-		JSONRestClient.__init__(self, cert = cert, url = url)
-		if (not cert) or (not os.path.exists(cert)):
-			self._log.warning(self._fmt_cert_error('Unable to use this grid webservice!'))
+	def __init__(self, cert=None, url=None, cert_error_msg='', cert_error_cls=Exception):
+		(self._cert_error_msg, self._cert_error_cls) = (cert_error_msg, cert_error_cls)
+		JSONRestClient.__init__(self, cert, url)
+		if not self._cert:
+			self._cert = ignore_exception(Exception, None, self._get_grid_cert)
+		if not self._cert:
+			self._log.warning(self._fmt_cert_error('Using this webservice requires a valid grid proxy!'))
 
 	def _fmt_cert_error(self, msg):
-		return (self._cert_errror_msg + ' ' + msg).strip()
+		return (self._cert_error_msg + ' ' + msg).strip()
 
-	def _request(self, request_fun, url, api, headers, params = None, data = None):
+	def _get_grid_cert(self):
+		cert = os.environ.get('X509_USER_PROXY', '')
+		if not cert:
+			self._raise_cert_error('Environment variable X509_USER_PROXY is not set!')
+		cert = os.path.expandvars(os.path.normpath(os.path.expanduser(cert)))
+		if os.path.exists(cert) and os.path.isfile(cert) and os.access(cert, os.R_OK):
+			return cert
+		self._raise_cert_error('Environment variable X509_USER_PROXY points to invalid path "%s"' % cert)
+
+	def _raise_cert_error(self, msg):
+		raise self._cert_error_cls(self._fmt_cert_error(msg))
+
+	def _request(self, request_fun, url, api, headers, params=None, data=None):
 		if not self._cert:
-			raise self._cert_errror_cls(self._fmt_cert_error('Environment variable X509_USER_PROXY is not set!'))
-		proxyPath = os.path.expandvars(os.path.normpath(os.path.expanduser(self._cert)))
-		if not os.path.exists(proxyPath):
-			raise self._cert_errror_cls(self._fmt_cert_error('Environment variable X509_USER_PROXY is "%s"' % proxyPath))
+			self._cert = self._get_grid_cert()
 		return JSONRestClient._request(self, request_fun, url, api, headers, params, data)
-
-
-def readURL(url, params = None, headers = None, cert = None):
-	return RestClient(cert).get(url = url, headers = headers, params = params)
-
-
-def readJSON(url, params = None, headers = None, cert = None):
-	return JSONRestClient(cert).get(url = url, headers = headers, params = params)

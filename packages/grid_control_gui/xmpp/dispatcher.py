@@ -93,7 +93,7 @@ class Dispatcher(PlugIn):
         self.Stream.DEBUG=self._owner.DEBUG
         self.Stream.features=None
         self._metastream=Node('stream:stream')
-        self._metastream.setNamespace(self._owner.Namespace)
+        self._metastream.set_namespace(self._owner.Namespace)
         self._metastream.setAttr('version','1.0')
         self._metastream.setAttr('xmlns:stream',NS_STREAMS)
         self._metastream.setAttr('to',self._owner.Server)
@@ -349,7 +349,7 @@ class Dispatcher(PlugIn):
         elif not stanza.getID():
             global ID
             ID+=1
-            _ID=`ID`
+            _ID=repr(ID)
             stanza.setID(_ID)
         else: _ID=stanza.getID()
         if self._owner._registered_name and not stanza.getAttr('from'): stanza.setAttr('from',self._owner._registered_name)
@@ -362,7 +362,7 @@ class Dispatcher(PlugIn):
                 frm=frm.getDomain()
             route=Protocol('route',to=to,frm=frm,payload=[stanza])
             stanza=route
-        stanza.setNamespace(self._owner.Namespace)
+        stanza.set_namespace(self._owner.Namespace)
         stanza.setParent(self._metastream)
         self._owner_send(stanza)
         return _ID

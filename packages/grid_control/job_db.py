@@ -1,4 +1,4 @@
-# | Copyright 2007-2016 Karlsruhe Institute of Technology
+# | Copyright 2007-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -12,210 +12,139 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-import os, time, fnmatch, logging, operator
-from grid_control import utils
+import time, logging
 from grid_control.gc_plugin import ConfigurablePlugin
-from grid_control.utils.data_structures import makeEnum
-from grid_control.utils.file_objects import SafeFile
-from hpfwk import NestedException
-from python_compat import imap, irange, reduce, sorted
+from grid_control.utils.data_structures import make_enum
+from hpfwk import AbstractError, NestedException
+from python_compat import irange, sorted
+
 
 class JobError(NestedException):
 	pass
 
-class Job(object):
-	__internals = ('wmsId', 'status')
 
+class Job(object):
 	def __init__(self):
 		self.state = Job.INIT
-		self.nextstate = None
 		self.attempt = 0
 		self.history = {}
-		self.wmsId = None
+		self.gc_id = None
 		self.submitted = 0
 		self.changed = 0
-		self.dict = {}
+		self._dict = {}
 
+	def assign_id(self, gc_id):
+		self.gc_id = gc_id
+		self.attempt = self.attempt + 1
+		self.submitted = time.time()
 
-	def loadData(cls, name, data):
-		try:
-			job = Job()
-			job.state = Job.str2enum(data.get('status'), Job.FAILED)
+	def clear_old_state(self):
+		self._dict.clear()
 
-			if 'id' in data:
-				if not data['id'].startswith('WMSID'): # Legacy support
-					data['legacy'] = data['id']
-					if data['id'].startswith('https'):
-						data['id'] = 'WMSID.GLITEWMS.%s' % data['id']
-					else:
-						wmsId, backend = tuple(data['id'].split('.', 1))
-						data['id'] = 'WMSID.%s.%s' % (backend, wmsId)
-				job.wmsId = data['id']
-			for key in ['attempt', 'submitted', 'changed']:
-				if key in data:
-					setattr(job, key, data[key])
-			if 'runtime' not in data:
-				if 'submitted' in data:
-					data['runtime'] = time.time() - float(job.submitted)
-				else:
-					data['runtime'] = 0
-			for key in irange(1, job.attempt + 1):
-				if ('history_' + str(key)).strip() in data:
-					job.history[key] = data['history_' + str(key)]
+	def get(self, key, default=None):
+		return self._dict.get(key, default)
 
-			for i in cls.__internals:
-				try:
-					del data[i]
-				except Exception:
-					pass
-			job.dict = data
-		except Exception:
-			raise JobError('Unable to parse data in %s:\n%r' % (name, data))
-		return job
-	loadData = classmethod(loadData)
+	def get_dict(self):
+		return {'id': self.gc_id, 'status': Job.enum2str(self.state),
+			'attempt': self.attempt, 'submitted': self.submitted, 'changed': self.changed}
 
+	def get_dict_full(self):
+		result = dict(self._dict)
+		result.update(self.get_dict())
+		return result
 
-	def load(cls, name):
-		try:
-			data = utils.DictFormat(escapeString = True).parse(open(name))
-		except Exception:
-			raise JobError('Invalid format in %s' % name)
-		return Job.loadData(name, data)
-	load = classmethod(load)
-
-
-	def getAll(self):
-		data = dict(self.dict)
-		data['status'] = Job.enum2str(self.state)
-		data['attempt'] = self.attempt
-		data['submitted'] = self.submitted
-		data['changed'] = self.changed
-		for key, value in self.history.items():
-			data['history_' + str(key)] = value
-		if self.wmsId is not None:
-			data['id'] = self.wmsId
-			if self.dict.get('legacy', None): # Legacy support
-				data['id'] = self.dict.pop('legacy')
-		return data
-
+	def get_job_location(self):
+		job_location_str = (self._dict.get('site') or '') + '/' + (self._dict.get('queue') or '')
+		return job_location_str.strip('/') or 'N/A'
 
 	def set(self, key, value):
-		self.dict[key] = value
+		self._dict[key.lower()] = value
 
-
-	def get(self, key, default = None):
-		return self.dict.get(key, default)
-
+	def set_dict(self, value):
+		self._dict = value
 
 	def update(self, state):
 		self.state = state
 		self.changed = time.time()
-		self.history[self.attempt] = self.dict.get('dest', 'N/A')
+		self.history[self.attempt] = self.get_job_location()
+
+make_enum(['INIT', 'SUBMITTED', 'DISABLED', 'READY', 'WAITING', 'QUEUED', 'ABORTED',
+		'RUNNING', 'CANCEL', 'UNKNOWN', 'CANCELLED', 'DONE', 'FAILED', 'SUCCESS', 'IGNORED'], Job)
 
 
-	def assignId(self, wmsId):
-		self.dict['legacy'] = None # Legacy support
-		self.wmsId = wmsId
-		self.attempt = self.attempt + 1
-		self.submitted = time.time()
+class JobClassHolder(object):
+	def __init__(self, *state_list):
+		self.state_list = tuple(state_list)
 
-makeEnum(['INIT', 'SUBMITTED', 'DISABLED', 'READY', 'WAITING', 'QUEUED', 'ABORTED',
-		'RUNNING', 'CANCELLED', 'DONE', 'FAILED', 'SUCCESS'], Job, useHash = False)
-
-
-class JobClass(object):
-	mkJobClass = lambda *fList: (reduce(operator.add, imap(lambda f: 1 << f, fList)), fList)
-	ATWMS = mkJobClass(Job.SUBMITTED, Job.WAITING, Job.READY, Job.QUEUED)
-	RUNNING = mkJobClass(Job.RUNNING)
-	PROCESSING = mkJobClass(Job.SUBMITTED, Job.WAITING, Job.READY, Job.QUEUED, Job.RUNNING)
-	READY = mkJobClass(Job.INIT, Job.FAILED, Job.ABORTED, Job.CANCELLED)
-	DONE = mkJobClass(Job.DONE)
-	SUCCESS = mkJobClass(Job.SUCCESS)
-	DISABLED = mkJobClass(Job.DISABLED)
-	ENDSTATE = mkJobClass(Job.SUCCESS, Job.DISABLED)
-	PROCESSED = mkJobClass(Job.SUCCESS, Job.FAILED, Job.CANCELLED, Job.ABORTED)
+	def lookup_job_class_name(cls, state_list):
+		for prop_name in dir(cls):
+			prop = getattr(cls, prop_name)
+			if isinstance(prop, JobClassHolder):
+				if sorted(getattr(prop, 'state_list')) == sorted(state_list):
+					return prop_name
+	lookup_job_class_name = classmethod(lookup_job_class_name)
 
 
 class JobDB(ConfigurablePlugin):
-	def __init__(self, config, jobLimit = -1, jobSelector = None):
+	def __init__(self, config, job_limit=-1, job_selector=None):
 		ConfigurablePlugin.__init__(self, config)
-		self._log = logging.getLogger('jobs')
-		self._dbPath = config.getWorkPath('jobs')
-		self._jobMap = self.readJobs(jobLimit)
-		if jobLimit < 0 and len(self._jobMap) > 0:
-			jobLimit = max(self._jobMap) + 1
-		(self.jobLimit, self.alwaysSelector) = (jobLimit, jobSelector)
-
-	def getWorkPath(self): # TODO: only used by report class
-		return os.path.abspath(os.path.join(self._dbPath, '..'))
-
-	def readJobs(self, jobLimit):
-		try:
-			if not os.path.exists(self._dbPath):
-				os.mkdir(self._dbPath)
-		except Exception:
-			raise JobError("Problem creating work directory '%s'" % self._dbPath)
-
-		candidates = []
-		for jobFile in fnmatch.filter(os.listdir(self._dbPath), 'job_*.txt'):
-			try: # 2xsplit is faster than regex
-				jobNum = int(jobFile.split(".")[0].split("_")[1])
-			except Exception:
-				continue
-			candidates.append((jobNum, jobFile))
-
-		(jobMap, maxJobs) = ({}, len(candidates))
-		activity = utils.ActivityLog('Reading job infos ...')
-		idx = 0
-		for (jobNum, jobFile) in sorted(candidates):
-			idx += 1
-			if (jobLimit >= 0) and (jobNum >= jobLimit):
-				self._log.info('Stopped reading job infos at job #%d out of %d available job files', jobNum, len(candidates))
-				break
-			jobObj = Job.load(os.path.join(self._dbPath, jobFile))
-			jobMap[jobNum] = jobObj
-			if idx % 100 == 0:
-				activity.finish()
-				activity = utils.ActivityLog('Reading job infos ... %d [%d%%]' % (idx, (100.0 * idx) / maxJobs))
-		activity.finish()
-		return jobMap
-
-
-	def get(self, jobNum, default = None, create = False):
-		if create:
-			self._jobMap[jobNum] = self._jobMap.get(jobNum, Job())
-		return self._jobMap.get(jobNum, default)
-
-
-	def getJobsIter(self, jobSelector = None, subset = None):
-		if subset is None:
-			subset = irange(self.jobLimit)
-		if jobSelector and self.alwaysSelector:
-			select = lambda *args: jobSelector(*args) and self.alwaysSelector(*args)
-		elif jobSelector or self.alwaysSelector:
-			select = jobSelector or self.alwaysSelector
-		else:
-			for jobNum in subset:
-				yield jobNum
-			raise StopIteration
-		for jobNum in subset:
-			if select(jobNum, self.get(jobNum, Job())):
-				yield jobNum
-
-
-	def getJobs(self, jobSelector = None, subset = None):
-		return list(self.getJobsIter(jobSelector, subset))
-
-
-	def getJobsN(self, jobSelector = None, subset = None):
-		return len(self.getJobs(jobSelector, subset)) # fastest method! (iter->list written in C)
-
-
-	def commit(self, jobNum, jobObj):
-		fp = SafeFile(os.path.join(self._dbPath, 'job_%d.txt' % jobNum), 'w')
-		fp.writelines(utils.DictFormat(escapeString = True).format(jobObj.getAll()))
-		fp.close()
-
+		self._log = logging.getLogger('jobs.db')
+		(self._job_limit, self._always_selector, self._default_job_obj) = (job_limit, job_selector, Job())
 
 	def __len__(self):
-		return self.jobLimit
+		return self._job_limit
+
+	def commit(self, jobnum, job_obj):
+		raise AbstractError
+
+	def get_job(self, jobnum):
+		raise AbstractError
+
+	def get_job_len(self, job_selector=None, subset=None):
+		return len(self.get_job_list(job_selector, subset))  # fastest method! (iter->list written in C)
+
+	def get_job_list(self, job_selector=None, subset=None):
+		return list(self.iter_jobs(job_selector, subset))
+
+	def get_job_persistent(self, jobnum):
+		raise AbstractError
+
+	def get_job_transient(self, jobnum):
+		raise AbstractError
+
+	def iter_jobs(self, job_selector=None, subset=None):
+		if subset is None:
+			subset = irange(self._job_limit)
+
+		if job_selector and self._always_selector:
+			def select(*args):
+				return job_selector(*args) and self._always_selector(*args)
+		elif job_selector or self._always_selector:
+			select = job_selector or self._always_selector
+		else:
+			for jobnum in subset:
+				yield jobnum
+		if job_selector or self._always_selector:
+			for jobnum in subset:
+				if select(jobnum, self.get_job_transient(jobnum)):
+					yield jobnum
+
+	def set_job_limit(self, value):
+		self._job_limit = value
+
+
+class JobClass(JobClassHolder):
+	ATWMS = JobClassHolder(Job.SUBMITTED, Job.WAITING, Job.READY, Job.QUEUED, Job.UNKNOWN)
+	CANCEL = JobClassHolder(Job.CANCEL)
+	DISABLED = JobClassHolder(Job.DISABLED)
+	DONE = JobClassHolder(Job.DONE)
+	ENDSTATE = JobClassHolder(Job.SUCCESS, Job.DISABLED)
+	INIT = JobClassHolder(Job.INIT)
+	PROCESSED = JobClassHolder(Job.SUCCESS, Job.FAILED, Job.CANCELLED, Job.ABORTED)
+	PROCESSING = JobClassHolder(Job.SUBMITTED, Job.WAITING, Job.READY,
+		Job.QUEUED, Job.UNKNOWN, Job.RUNNING)
+	RUNNING = JobClassHolder(Job.RUNNING)
+	RUNNING_DONE = JobClassHolder(Job.RUNNING, Job.DONE)
+	FAILING = JobClassHolder(Job.FAILED, Job.ABORTED, Job.CANCELLED)
+	SUBMIT_CANDIDATES = JobClassHolder(Job.INIT, Job.FAILED, Job.ABORTED, Job.CANCELLED)
+	SUCCESS = JobClassHolder(Job.SUCCESS)

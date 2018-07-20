@@ -1,5 +1,5 @@
 #!/bin/bash
-# | Copyright 2008-2016 Karlsruhe Institute of Technology
+# | Copyright 2008-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -13,14 +13,14 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-# grid-control: https://ekptrac.physik.uni-karlsruhe.de/trac/grid-control
+# Source: github.com/grid-control
 
 # 110 - project area setup failed
 # 111 - CMSSW environment unpacking failed
 # 112 - CMSSW environment setup failed
 # 113 - Problem while hashing config file
 
-source $GC_LANDINGZONE/gc-run.lib || exit 101
+source "$GC_LANDINGZONE/gc-run.lib" || exit 101
 
 echo "CMSSW module starting"
 echo
@@ -28,20 +28,20 @@ echo "---------------------------"
 timestamp "CMSSW_STARTUP" "START"
 echo "==========================="
 
-echo "NEventsProcessed=${MAX_EVENTS:-0}" > ${GC_DASHBOARDINFO:-/dev/null}
+echo "NEventsProcessed=${MAX_EVENTS:-0}" > "${GC_DASHBOARDINFO:-/dev/null}"
 
 checkvar "VO_CMS_SW_DIR"
-checkfile "$VO_CMS_SW_DIR/cmsset_default.sh"
+gc_check_file_exists "$VO_CMS_SW_DIR/cmsset_default.sh"
 
-saved_SCRAM_VERSION="$SCRAM_VERSION"
-saved_SCRAM_ARCH="$SCRAM_ARCH"
+SAVED_SCRAM_VERSION="$SCRAM_VERSION"
+SAVED_SCRAM_ARCH="$SCRAM_ARCH"
 source "$VO_CMS_SW_DIR/cmsset_default.sh"
-SCRAM_VERSION="$saved_SCRAM_VERSION"
-export SCRAM_ARCH="$saved_SCRAM_ARCH"
+SCRAM_VERSION="$SAVED_SCRAM_VERSION"
+export SCRAM_ARCH="$SAVED_SCRAM_ARCH"
 declare +x SCRAM_VERSION
 
-SCRAM="`which \"\$SCRAM_VERSION\"`"
-checkbin "$SCRAM"
+SCRAM="$(which "$SCRAM_VERSION")"
+gc_check_bin "$SCRAM" || fail 103
 
 echo "Installed CMSSW versions:"
 $SCRAM list -c CMSSW | sort | awk '{printf $2" "}'
@@ -53,30 +53,30 @@ if ! $SCRAM project CMSSW $SCRAM_PROJECTVERSION; then
 fi
 
 checkdir "SCRAM project area" "$SCRAM_PROJECTVERSION"
-cd "$SCRAM_PROJECTVERSION"
+cd "$SCRAM_PROJECTVERSION" || fail 102
 
-if ! [ "$HAS_RUNTIME" = no ]; then
+if [ "$HAS_RUNTIME" = "yes" ]; then
 
-	if [ "$SE_RUNTIME" = yes ]; then
+	if [ "$SE_RUNTIME" = "yes" ]; then
 		echo "Rename CMSSW environment package: ${GC_TASK_ID}.tar.gz"
-		mv `_find ${GC_TASK_ID}.tar.gz` runtime.tar.gz || fail 101
+		mv $(_find ${GC_TASK_ID}.tar.gz) cmssw-project-area.tar.gz || fail 101
 		export SE_INPUT_FILES="${SE_INPUT_FILES/${GC_TASK_ID}.tar.gz/}"
 	fi
 
 	echo "Unpacking CMSSW environment"
-	tar xvfz "`_find runtime.tar.gz`" || fail 111
+	tar xvfz "$(_find cmssw-project-area.tar.gz)" || fail 111
 fi
 
 echo "Setup CMSSW environment"
-eval `$SCRAM runtime -sh` || fail 112
+eval $($SCRAM runtime -sh) || fail 112
 checkvar "CMSSW_BASE"
 checkvar "CMSSW_RELEASE_BASE"
-checkbin "cmsRun"
-checkbin "edmConfigHash"
+gc_check_bin "cmsRun" || fail 103
+gc_check_bin "edmConfigHash" || fail 103
 
 # patch python path data
 if [ -n "$CMSSW_OLD_RELEASETOP" ]; then
-	for INITFILE in `find -iname __init__.py`; do
+	for INITFILE in $(find -iname __init__.py); do
 		echo "Fixing CMSSW path in file: $INITFILE"
 		sed -i -e "s@$CMSSW_OLD_RELEASETOP@$CMSSW_RELEASE_BASE@" $INITFILE
 	done
@@ -85,34 +85,35 @@ echo
 
 echo "---------------------------"
 echo
-export GC_WORKDIR="`pwd`/workdir"
+export GC_WORKDIR="$(pwd)/workdir"
 export CMSSW_SEARCH_PATH="$CMSSW_SEARCH_PATH:$GC_WORKDIR"
-mkdir -p "$GC_WORKDIR"; cd "$GC_WORKDIR"
-my_move "$GC_SCRATCH" "$GC_WORKDIR" "$SB_INPUT_FILES $SE_INPUT_FILES $CMSSW_PROLOG_SB_In_FILES $CMSSW_EPILOG_SB_In_FILES"
+mkdir -p "$GC_WORKDIR"; cd "$GC_WORKDIR" || fail 102
+my_move "$GC_SCRATCH" "$GC_WORKDIR" "$SB_INPUT_FILES $SE_INPUT_FILES $CMSSW_PROLOG_SB_IN_FILES $CMSSW_EPILOG_SB_IN_FILES"
+
+# If dataset files copied via SRM are available, then move them too
+for DATASET_SRM_FILE in $DATASET_SRM_FILES; do
+	my_move "$GC_SCRATCH" "$GC_WORKDIR" "$(basename $DATASET_SRM_FILE)"
+done
 echo
 echo "==========================="
 timestamp "CMSSW_STARTUP" "DONE"
 
 GC_CMSSWRUN_RETCODE=0
 # Additional prolog scripts in the CMSSW environment
-for CMSSW_BIN in $CMSSW_PROLOG_EXEC; do
-	_PROLOG_COUNT=1
-	timestamp "CMSSW_PROLOG${_PROLOG_COUNT}" "START"
+if [ -n "$CMSSW_PROLOG_EXEC" ]; then
+	timestamp "CMSSW_PROLOG1" "START"
 	echo "---------------------------"
 	echo
-	echo "Starting $CMSSW_BIN with arguments: $CMSSW_PROLOG_ARGS"
-#	checkbin "$CMSSW_BIN"
-	eval "$CMSSW_BIN $CMSSW_PROLOG_ARGS"
+	echo "Starting $CMSSW_PROLOG_EXEC with arguments: $CMSSW_PROLOG_ARGS"
+	eval "$CMSSW_PROLOG_EXEC $CMSSW_PROLOG_ARGS"
 	GC_CMSSWRUN_RETCODE=$?
 	echo
-	timestamp "CMSSW_PROLOG${_PROLOG_COUNT}" "DONE"
-	_PROLOG_COUNT=$[ $_PROLOG_COUNT +1]
-	if [ "$GC_CMSSWRUN_RETCODE" != "0" ];then
-		echo "Prologue $CMSSW_BIN failed with code: $GC_CMSSWRUN_RETCODE"
+	timestamp "CMSSW_PROLOG1" "DONE"
+	if [ "$GC_CMSSWRUN_RETCODE" != "0" ]; then
+		echo "Prologue $CMSSW_EPILOG_EXEC failed with code: $GC_CMSSWRUN_RETCODE"
 		echo "Aborting..."
-		break
 	fi
-done
+fi
 
 echo "---------------------------"
 echo
@@ -121,19 +122,19 @@ checkdir "CMSSW working directory" "$GC_WORKDIR"
 if [ "$GC_CMSSWRUN_RETCODE" == "0" ] && [ -n "$CMSSW_CONFIG" ]; then
 	echo "---------------------------"
 	echo
-	cd "$GC_WORKDIR"
+	cd "$GC_WORKDIR" || fail 102
 	for CFG_NAME in $CMSSW_CONFIG; do
 		CFG_BASENAME="$(basename $CFG_NAME)"
 		_CMSRUN_COUNT=1
 		timestamp "CMSSW_CMSRUN${_CMSRUN_COUNT}" "START"
 		echo "Config file: $CFG_NAME"
 		echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~"
-		checkfile "$CFG_NAME"
+		gc_check_file_exists "$CFG_NAME"
 		DBSDIR="$GC_WORKDIR/cmssw.dbs/$CFG_BASENAME"
 		mkdir -p "$DBSDIR"
 
 		echo "Substituting variables..."
-		cat "$CFG_NAME" | var_replacer "$CFG_BASENAME" > "$DBSDIR/config"
+		cat "$CFG_NAME" | var_replacer > "$DBSDIR/config"
 
 		echo "Calculating config file hash..."
 		(
@@ -150,6 +151,7 @@ if [ "$GC_CMSSWRUN_RETCODE" == "0" ] && [ -n "$CMSSW_CONFIG" ]; then
 		if [ "$CODE" != "0" ]; then
 			echo "Problem while hashing config file:"
 			echo "---------------------------"
+			cat "$DBSDIR/hash"
 			echo "Executing python $CFG_BASENAME (modified for edmConfigHash) ..."
 			python "$CFG_BASENAME" 2>&1
 			echo "---------------------------"
@@ -169,7 +171,7 @@ if [ "$GC_CMSSWRUN_RETCODE" == "0" ] && [ -n "$CMSSW_CONFIG" ]; then
 				echo
 			) 2>&1 | gzip -9 > "$CFG_BASENAME.rawlog.gz"
 			[ -f "$GC_LANDINGZONE/exitcode.txt" ] && CODE=$(< "$GC_LANDINGZONE/exitcode.txt") && rm -f "$GC_LANDINGZONE/exitcode.txt"
-		else 
+		else
 			cmsRun -j "$DBSDIR/report.xml" -e "$CFG_BASENAME" $@
 			CODE=$?
 		fi
@@ -185,7 +187,7 @@ if [ "$GC_CMSSWRUN_RETCODE" == "0" ] && [ -n "$CMSSW_CONFIG" ]; then
 		fi
 	done
 	echo -e "CMSSW output on stdout and stderr:\n" | gzip > "00000.rawlog.gz"
-	[ "$GZIP_OUT" = "yes" ] && zcat -f *.rawlog.gz | gzip -9 > "cmssw.log.gz"
+	[ "$GZIP_OUT" = "yes" ] && zcat -f ./*.rawlog.gz | gzip -9 > "cmssw.log.gz"
 
 	# Calculate hash of output files for DBS
 	echo "Calculating output file hash..."
@@ -200,25 +202,21 @@ if [ "$GC_CMSSWRUN_RETCODE" == "0" ] && [ -n "$CMSSW_CONFIG" ]; then
 fi
 
 # Additional epilog script in the CMSSW environment
-if [ "$GC_CMSSWRUN_RETCODE" == "0" ]; then
-#	for CMSSW_BIN in $CMSSW_EPILOG_EXEC; do
-		_EPILOG_COUNT=1
-		timestamp "CMSSW_EPILOG${_EPILOG_COUNT}" "START"
+if [ -n "$CMSSW_EPILOG_EXEC" ]; then
+	if [ "$GC_CMSSWRUN_RETCODE" == "0" ]; then
+		timestamp "CMSSW_EPILOG1" "START"
 		echo "---------------------------"
 		echo
 		echo "Starting $CMSSW_EPILOG_EXEC with arguments: $CMSSW_EPILOG_ARGS"
-#		checkbin "$CMSSW_BIN"
 		eval "$CMSSW_EPILOG_EXEC $CMSSW_EPILOG_ARGS"
 		GC_CMSSWRUN_RETCODE=$?
 		echo
-		timestamp "CMSSW_EPILOG${_EPILOG_COUNT}" "DONE"
-		_EPILOG_COUNT=$[ $_EPILOG_COUNT +1]
-		if [ "$GC_CMSSWRUN_RETCODE" != "0" ];then
+		timestamp "CMSSW_EPILOG1" "DONE"
+		if [ "$GC_CMSSWRUN_RETCODE" != "0" ]; then
 			echo "Epilogue $CMSSW_EPILOG_EXEC failed with code: $GC_CMSSWRUN_RETCODE"
 			echo "Aborting..."
-#			break
 		fi
-#	done
+	fi
 fi
 
 echo

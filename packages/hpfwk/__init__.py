@@ -1,4 +1,4 @@
-# | Copyright 2009-2016 Karlsruhe Institute of Technology
+# | Copyright 2009-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -12,8 +12,14 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-from hpfwk.hpf_exceptions import APIError, AbstractError, ExceptionCollector, ExceptionFormatter, NestedException, clearException, handle_debug_interrupt
-from hpfwk.hpf_plugin import InstanceFactory, Plugin, init_hpf_plugins
+# pylint:disable=line-too-long
 
-__all__ = ['APIError', 'AbstractError', 'ExceptionCollector', 'ExceptionFormatter', 'InstanceFactory',
-	'NestedException', 'Plugin', 'clearException', 'handle_debug_interrupt', 'init_hpf_plugins']
+from hpfwk.hpf_debug import DebugInterface, format_exception, get_thread_name, get_trace_fun, ignore_exception
+from hpfwk.hpf_exceptions import APIError, AbstractError, ExceptionCollector, NestedException, clear_current_exception, except_nested, get_current_exception, rethrow
+from hpfwk.hpf_plugin import InstanceFactory, Plugin, PluginError, init_hpf_plugins
+
+
+__all__ = ['AbstractError', 'APIError', 'clear_current_exception', 'DebugInterface',
+	'except_nested', 'ExceptionCollector', 'format_exception', 'get_current_exception',
+	'get_thread_name', 'get_trace_fun', 'ignore_exception', 'init_hpf_plugins', 'InstanceFactory',
+	'NestedException', 'Plugin', 'PluginError', 'rethrow']

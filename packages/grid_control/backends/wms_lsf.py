@@ -1,4 +1,4 @@
-# | Copyright 2008-2016 Karlsruhe Institute of Technology
+# | Copyright 2008-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -12,41 +12,68 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-from grid_control import utils
+from grid_control.backends.aspect_cancel import CancelJobsWithProcessBlind
+from grid_control.backends.aspect_status import CheckInfo, CheckJobsMissingState, CheckJobsWithProcess  # pylint:disable=line-too-long
+from grid_control.backends.backend_tools import ProcessCreatorAppendArguments
 from grid_control.backends.wms import BackendError, WMS
 from grid_control.backends.wms_local import LocalWMS
 from grid_control.job_db import Job
-from python_compat import izip, next
+from grid_control.utils import resolve_install_path
+from python_compat import identity, ifilter, izip, next
+
+
+class LSFCancelJobs(CancelJobsWithProcessBlind):
+	def __init__(self, config):
+		CancelJobsWithProcessBlind.__init__(self, config, 'bkill', unknown_id='is not found')
+
+
+class LSFCheckJobs(CheckJobsWithProcess):
+	def __init__(self, config):
+		CheckJobsWithProcess.__init__(self, config,
+			ProcessCreatorAppendArguments(config, 'bjobs', ['-aw']), status_map={
+				Job.DONE: ['DONE', 'EXIT', 'UNKWN', 'ZOMBI'],
+				Job.QUEUED: ['PEND'],
+				Job.RUNNING: ['RUN'],
+				Job.WAITING: ['PSUSP', 'USUSP', 'SSUSP', 'WAIT'],
+			})
+
+	def _handle_error(self, proc):
+		self._filter_proc_log(proc, self._errormsg, blacklist=['is not found'])
+
+	def _parse(self, proc):
+		status_iter = proc.stdout.iter(timeout=self._timeout)
+		next(status_iter)
+		tmp_head = [CheckInfo.WMSID, 'user', CheckInfo.RAW_STATUS,
+			CheckInfo.QUEUE, 'from', CheckInfo.WN, 'job_name']
+		for line in ifilter(identity, status_iter):
+			try:
+				tmp = line.split()
+				job_info = dict(izip(tmp_head, tmp[:7]))
+				job_info['submit_time'] = str.join(' ', tmp[7:10])
+				yield job_info
+			except Exception:
+				raise BackendError('Error reading job info:\n%s' % line)
+
 
 class LSF(LocalWMS):
-	configSections = LocalWMS.configSections + ['LSF']
-	_statusMap = {
-		'PEND':  Job.QUEUED,  'PSUSP': Job.WAITING,
-		'USUSP': Job.WAITING, 'SSUSP': Job.WAITING,
-		'RUN':   Job.RUNNING, 'DONE':  Job.DONE,
-		'WAIT':  Job.WAITING, 'EXIT':  Job.FAILED,
-		# Better options?
-		'UNKWN': Job.FAILED,  'ZOMBI': Job.FAILED,
-	}
+	config_section_list = LocalWMS.config_section_list + ['LSF']
 
 	def __init__(self, config, name):
 		LocalWMS.__init__(self, config, name,
-			submitExec = utils.resolveInstallPath('bsub'),
-			statusExec = utils.resolveInstallPath('bjobs'),
-			cancelExec = utils.resolveInstallPath('bkill'))
+			submit_exec=resolve_install_path('bsub'),
+			cancel_executor=LSFCancelJobs(config),
+			check_executor=CheckJobsMissingState(config, LSFCheckJobs(config)))
 
+	def parse_submit_output(self, data):
+		# Job <34020017> is submitted to queue <1nh>.
+		return data.split()[1].strip('<>').strip()
 
-	def unknownID(self):
-		return 'is not found'
-
-
-	def getJobArguments(self, jobNum, sandbox):
+	def _get_job_arguments(self, jobnum, sandbox):
 		return repr(sandbox)
 
-
-	def getSubmitArguments(self, jobNum, jobName, reqs, sandbox, stdout, stderr):
+	def _get_submit_arguments(self, jobnum, job_name, reqs, sandbox, stdout, stderr):
 		# Job name
-		params = ' -J %s' % jobName
+		params = ' -J %s' % job_name
 		# Job requirements
 		if WMS.QUEUES in reqs:
 			params += ' -q %s' % str.join(',', reqs[WMS.QUEUES])
@@ -57,33 +84,3 @@ class LSF(LocalWMS):
 		# IO paths
 		params += ' -o "%s" -e "%s"' % (stdout, stderr)
 		return params
-
-
-	def parseSubmitOutput(self, data):
-		# Job <34020017> is submitted to queue <1nh>.
-		return data.split()[1].strip('<>').strip()
-
-
-	def parseStatus(self, status):
-		next(status)
-		tmpHead = ['id', 'user', 'status', 'queue', 'from', 'dest_host', 'job_name']
-		for jobline in status:
-			if jobline != '':
-				try:
-					tmp = jobline.split()
-					jobinfo = dict(izip(tmpHead, tmp[:7]))
-					jobinfo['submit_time'] = str.join(' ', tmp[7:10])
-					jobinfo['dest'] = 'N/A'
-					if jobinfo['dest_host'] != '-':
-						jobinfo['dest'] = '%s/%s' % (jobinfo['dest_host'], jobinfo['queue'])
-					yield jobinfo
-				except Exception:
-					raise BackendError('Error reading job info:\n%s' % jobline)
-
-
-	def getCheckArguments(self, wmsIds):
-		return '-aw %s' % str.join(' ', wmsIds)
-
-
-	def getCancelArguments(self, wmsIds):
-		return str.join(' ', wmsIds)

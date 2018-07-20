@@ -1,4 +1,4 @@
-# | Copyright 2010-2016 Karlsruhe Institute of Technology
+# | Copyright 2010-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -12,47 +12,51 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-import os
-from grid_control import utils
-from grid_control.config import ConfigError, changeInitNeeded
+import os, logging
+from grid_control.config import ConfigError, TriggerInit
 from grid_control.tasks.task_user import UserTask
+from grid_control.utils import Result, get_path_share
+from grid_control.utils.algos import dict_union
+
 
 class ROOTTask(UserTask):
-	alias = ['ROOTMod', 'root']
-	configSections = UserTask.configSections + ['ROOTMod', 'ROOTTask']
+	alias_list = ['ROOTMod', 'root']
+	config_section_list = UserTask.config_section_list + ['ROOTMod', 'ROOTTask']
 
 	def __init__(self, config, name):
 		# Determine ROOT path from previous settings / environment / config file
-		self._rootpath = config.get('root path', os.environ.get('ROOTSYS', ''), persistent = True, onChange = changeInitNeeded('sandbox'))
-		if not self._rootpath:
+		def _check_root_dn(loc, obj):
+			if os.path.isdir(obj):
+				return obj
 			raise ConfigError('Either set environment variable "ROOTSYS" or set option "root path"!')
-		utils.vprint('Using the following ROOT path: %s' % self._rootpath, -1)
+		self._root_dn = config.get_dn('root path', os.environ.get('ROOTSYS', ''),
+			persistent=True, on_change=TriggerInit('sandbox'), on_valid=_check_root_dn)
+		logging.getLogger('task').info('Using the following ROOT path: %s', self._root_dn)
 
 		# Special handling for executables bundled with ROOT
-		self._executable = config.get('executable', onChange = changeInitNeeded('sandbox'))
-		exeFull = os.path.join(self._rootpath, 'bin', self._executable.lstrip('/'))
-		self.builtIn = os.path.exists(exeFull)
-		if self.builtIn:
+		self._executable = config.get('executable', on_change=TriggerInit('sandbox'))
+		exe_full = os.path.join(self._root_dn, 'bin', self._executable.lstrip('/'))
+		self._is_builtin = os.path.exists(exe_full)
+		if self._is_builtin:
 			config.set('send executable', 'False')
 			# store resolved built-in executable path?
 
 		# Apply default handling from UserTask
 		UserTask.__init__(self, config, name)
-		self.updateErrorDict(utils.pathShare('gc-run.root.sh'))
+		self._update_map_error_code2msg(get_path_share('gc-run.root.sh'))
 
 		# Collect lib files needed by executable
-		self.libFiles = []
+		self._lib_fn_list = []
 
-
-	def getTaskConfig(self):
-		return utils.mergeDicts([UserTask.getTaskConfig(self), {'GC_ROOTSYS': self._rootpath}])
-
-
-	def getCommand(self):
+	def get_command(self):
 		cmd = './gc-run.root.sh %s $@ > job.stdout 2> job.stderr' % self._executable
-		return utils.QM(self.builtIn, '', 'chmod u+x %s; ' % self._executable) + cmd
+		if self._is_builtin:
+			return cmd
+		return 'chmod u+x %s; %s' % (self._executable, cmd)
 
+	def get_sb_in_fpi_list(self):
+		return UserTask.get_sb_in_fpi_list(self) + self._lib_fn_list + [
+			Result(path_abs=get_path_share('gc-run.root.sh'), path_rel='gc-run.root.sh')]
 
-	def getSBInFiles(self):
-		return UserTask.getSBInFiles(self) + self.libFiles + [
-			utils.Result(pathAbs = utils.pathShare('gc-run.root.sh'), pathRel = 'gc-run.root.sh')]
+	def get_task_dict(self):
+		return dict_union(UserTask.get_task_dict(self), {'GC_ROOTSYS': self._root_dn})

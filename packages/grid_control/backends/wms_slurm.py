@@ -1,4 +1,4 @@
-# | Copyright 2009-2016 Karlsruhe Institute of Technology
+# | Copyright 2009-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -12,85 +12,63 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-from grid_control import utils
-from grid_control.backends import WMS
+from grid_control.backends.aspect_cancel import CancelJobsWithProcessBlind
+from grid_control.backends.aspect_status import CheckInfo, CheckJobsMissingState, CheckJobsWithProcess  # pylint:disable=line-too-long
+from grid_control.backends.backend_tools import ProcessCreatorAppendArguments
+from grid_control.backends.wms import BackendError, WMS
 from grid_control.backends.wms_local import LocalWMS
 from grid_control.job_db import Job
-from python_compat import sorted
+from grid_control.utils import resolve_install_path
+from hpfwk import clear_current_exception
+from python_compat import identity, ifilter
+
+
+class SLURMCheckJobs(CheckJobsWithProcess):
+	def __init__(self, config):
+		proc_factory = ProcessCreatorAppendArguments(config,
+			'sacct', ['-n', '-o', 'jobid,partition,state,exitcode', '-j'],
+			lambda wms_id_list: [str.join(',', wms_id_list)])
+		CheckJobsWithProcess.__init__(self, config, proc_factory, status_map={
+			Job.ABORTED: ['CANCELLED+', 'NODE_FAIL', 'CANCELLED', 'FAILED'],
+			Job.DONE: ['COMPLETED', 'COMPLETING'],
+			Job.RUNNING: ['RUNNING'],
+			Job.WAITING: ['PENDING'],
+		})
+
+	def _parse(self, proc):
+		for line in ifilter(identity, proc.stdout.iter(self._timeout)):
+			if 'error' in line.lower():
+				raise BackendError('Unable to parse status line %s' % repr(line))
+			tmp = line.split()
+			try:
+				wms_id = str(int(tmp[0]))
+			except Exception:
+				clear_current_exception()
+				continue
+			yield {CheckInfo.WMSID: wms_id, CheckInfo.RAW_STATUS: tmp[2], CheckInfo.QUEUE: tmp[1]}
+
 
 class SLURM(LocalWMS):
-	configSections = LocalWMS.configSections + ['SLURM']
-	_statusMap = { # dictionary mapping vanilla condor job status to GC job status
-		#'0' : Job.WAITING	,# unexpanded (never been run)
-		'PENDING' : Job.WAITING	,# idle (waiting for a machine to execute on)
-		'RUNNING' : Job.RUNNING	,# running
-		'COMPLETED' : Job.DONE	,# running
-		'COMPLETING' : Job.DONE	,# running
-		'CANCELLED+' : Job.ABORTED	,# removed
-		'NODE_FAIL' : Job.ABORTED	,# removed
-		'CANCELLED' : Job.ABORTED	,# removed
-		#'5' : Job.WAITING	,#DISABLED	,# on hold
-		'FAILED' : Job.FAILED	,# submit error
-		}
+	config_section_list = LocalWMS.config_section_list + ['SLURM']
 
-	def __init__(self, config, wmsName = None):
-		LocalWMS.__init__(self, config, wmsName,
-			submitExec = utils.resolveInstallPath('sbatch'),
-			statusExec = utils.resolveInstallPath('sacct'),
-			cancelExec = utils.resolveInstallPath('scancel'))
+	def __init__(self, config, name):
+		LocalWMS.__init__(self, config, name,
+			submit_exec=resolve_install_path('sbatch'),
+			check_executor=CheckJobsMissingState(config, SLURMCheckJobs(config)),
+			cancel_executor=CancelJobsWithProcessBlind(config, 'scancel', unknown_id='not in queue !'))
 
+	def parse_submit_output(self, data):
+		# job_submit: Job 121195 has been submitted.
+		return int(data.split()[3].strip())
 
-	def unknownID(self):
-		return 'not in queue !'
-
-
-	def getJobArguments(self, jobNum, sandbox):
+	def _get_job_arguments(self, jobnum, sandbox):
 		return repr(sandbox)
 
-
-	def getSubmitArguments(self, jobNum, jobName, reqs, sandbox, stdout, stderr):
+	def _get_submit_arguments(self, jobnum, job_name, reqs, sandbox, stdout, stderr):
 		# Job name
-		params = ' -J "%s"' % jobName
+		params = ' -J "%s"' % job_name
 		# processes and IO paths
 		params += ' -o "%s" -e "%s"' % (stdout, stderr)
 		if WMS.QUEUES in reqs:
 			params += ' -p %s' % reqs[WMS.QUEUES][0]
 		return params
-
-
-	def parseSubmitOutput(self, data):
-		# job_submit: Job 121195 has been submitted.
-		return int(data.split()[3].strip())
-
-	def parseStatus(self, status):
-		for jobline in str.join('', list(status)).split('\n'):
-			if 'error' in jobline.lower():
-				self._log.warning('got error: %r', jobline)
-				yield {None: 'abort'}
-			if jobline == '':
-				continue
-
-			jobinfo = dict()
-
-			jl = jobline.split()
-			try:
-				jobid = int(jl[0])
-			except Exception:
-				continue
-
-			if not jl[2] in self._statusMap.keys():
-				self._log.warning('unable to parse status=%r %r %r', jl, jl[2], sorted(list(self._statusMap.keys())))
-				continue
-
-			jobinfo['id'] = jobid
-			jobinfo['queue'] = jl[1]
-			jobinfo['status'] = jl[2]
-			yield jobinfo
-
-
-	def getCheckArguments(self, wmsIds):
-		return '-n -o jobid,partition,state,exitcode -j %s' % str.join(',', wmsIds)
-
-
-	def getCancelArguments(self, wmsIds):
-		return str.join(' ', wmsIds)

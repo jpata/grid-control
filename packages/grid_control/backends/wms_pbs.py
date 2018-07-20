@@ -1,4 +1,4 @@
-# | Copyright 2009-2016 Karlsruhe Institute of Technology
+# | Copyright 2009-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -12,101 +12,114 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-from grid_control import utils
+from grid_control.backends.aspect_cancel import CancelJobsWithProcessBlind
+from grid_control.backends.aspect_status import CheckInfo, CheckJobsMissingState, CheckJobsWithProcess  # pylint:disable=line-too-long
+from grid_control.backends.backend_tools import BackendDiscovery, ProcessCreatorAppendArguments
 from grid_control.backends.wms import BackendError, WMS
 from grid_control.backends.wms_pbsge import PBSGECommon
 from grid_control.job_db import Job
-from grid_control.utils.parsing import parseTime
+from grid_control.utils import DictFormat, accumulate, resolve_install_path
+from grid_control.utils.parsing import parse_time
 from grid_control.utils.process_base import LocalProcess
-from python_compat import ifilter, imap, izip, lmap
-
-class PBS(PBSGECommon):
-	configSections = PBSGECommon.configSections + ['PBS']
-	_statusMap = {
-		'H': Job.SUBMITTED, 'S': Job.SUBMITTED,
-		'W': Job.WAITING,   'Q': Job.QUEUED,
-		'R': Job.RUNNING,   'C': Job.DONE,
-		'E': Job.DONE,      'T': Job.DONE,
-		'fail':	Job.FAILED, 'success': Job.SUCCESS
-	}
-
-	def __init__(self, config, name):
-		PBSGECommon.__init__(self, config, name)
-		self._nodesExec = utils.resolveInstallPath('pbsnodes')
-		self._server = config.get('server', '', onChange = None)
-		self._fqid = lambda wmsId: utils.QM(self._server, '%s.%s' % (wmsId, self._server), wmsId)
+from python_compat import identity, ifilter, izip, lmap
 
 
-	def getSubmitArguments(self, jobNum, jobName, reqs, sandbox, stdout, stderr):
-		reqMap = { WMS.MEMORY: ('pvmem', lambda m: '%dmb' % m) }
-		params = PBSGECommon.getSubmitArguments(self, jobNum, jobName, reqs, sandbox, stdout, stderr, reqMap)
-		# Job requirements
-		if reqs.get(WMS.QUEUES):
-			params += ' -q %s' % reqs[WMS.QUEUES][0]
-		if reqs.get(WMS.SITES):
-			params += ' -l host=%s' % str.join('+', reqs[WMS.SITES])
-		return params
+class PBSDiscoverNodes(BackendDiscovery):
+	def __init__(self, config):
+		BackendDiscovery.__init__(self, config)
+		self._timeout = config.get_time('discovery timeout', 30, on_change=None)
+		self._exec = resolve_install_path('pbsnodes')
+
+	def discover(self):
+		proc = LocalProcess(self._exec)
+		for line in proc.stdout.iter(timeout=self._timeout):
+			if not line.startswith(' ') and len(line) > 1:
+				node = line.strip()
+			if ('state = ' in line) and ('down' not in line) and ('offline' not in line):
+				yield {'name': node}
+		proc.status_raise(timeout=0)
 
 
-	def parseSubmitOutput(self, data):
-		# 1667161.ekpplusctl.ekpplus.cluster
-		return data.split('.')[0].strip()
+class PBSDiscoverQueues(BackendDiscovery):
+	def __init__(self, config):
+		BackendDiscovery.__init__(self, config)
+		self._exec = resolve_install_path('qstat')
 
-
-	def parseStatus(self, status):
-		for section in utils.accumulate(status, '', lambda x, buf: x == '\n'):
-			try:
-				lines = section.replace('\n\t', '').split('\n')
-				jobinfo = utils.DictFormat(' = ').parse(lines[1:])
-				jobinfo['id'] = lines[0].split(':')[1].split('.')[0].strip()
-				jobinfo['status'] = jobinfo.get('job_state')
-				jobinfo['dest'] = 'N/A'
-				if 'exec_host' in jobinfo:
-					jobinfo['dest'] = '%s/%s' % (
-						jobinfo.get('exec_host').split('/')[0] + '.' + jobinfo.get('server', ''),
-						jobinfo.get('queue')
-					)
-			except Exception:
-				raise BackendError('Error reading job info:\n%s' % section)
-			yield jobinfo
-
-
-	def getCheckArguments(self, wmsIds):
-		return '-f %s' % str.join(' ', imap(self._fqid, wmsIds))
-
-
-	def getCancelArguments(self, wmsIds):
-		return str.join(' ', imap(self._fqid, wmsIds))
-
-
-	def getQueues(self):
-		(queues, active) = ({}, False)
+	def discover(self):
+		active = False
 		keys = [WMS.MEMORY, WMS.CPUTIME, WMS.WALLTIME]
-		parser = dict(izip(keys, [int, parseTime, parseTime]))
-		proc = LocalProcess(self.statusExec, '-q')
-		for line in proc.stdout.iter(timeout = 10):
+		parser = dict(izip(keys, [int, parse_time, parse_time]))
+		proc = LocalProcess(self._exec, '-q')
+		for line in proc.stdout.iter(timeout=10):
 			if line.startswith('-'):
 				active = True
 			elif line.startswith(' '):
 				active = False
 			elif active:
 				fields = lmap(str.strip, line.split()[:4])
-				queueInfo = {}
+				queue_dict = {'name': fields[0]}
 				for key, value in ifilter(lambda k_v: not k_v[1].startswith('-'), izip(keys, fields[1:])):
-					queueInfo[key] = parser[key](value)
-				queues[fields[0]] = queueInfo
-		proc.status_raise(timeout = 0)
-		return queues
+					queue_dict[key] = parser[key](value)
+				yield queue_dict
+		proc.status_raise(timeout=0)
 
 
-	def getNodes(self):
-		result = []
-		proc = LocalProcess(self._nodesExec)
-		for line in proc.stdout.iter():
-			if not line.startswith(' ') and len(line) > 1:
-				node = line.strip()
-			if ('state = ' in line) and ('down' not in line) and ('offline' not in line):
-				result.append(node)
-		proc.status_raise(timeout = 0)
-		if len(result) > 0:
-			return result
+class PBSCheckJobs(CheckJobsWithProcess):
+	def __init__(self, config, fqid_fun=identity):
+		proc_factory = ProcessCreatorAppendArguments(config, 'qstat', ['-f'],
+			lambda wms_id_list: lmap(fqid_fun, wms_id_list))
+		CheckJobsWithProcess.__init__(self, config, proc_factory, status_map={
+			Job.DONE: ['C', 'E', 'T', 'fail', 'success'],
+			Job.QUEUED: ['Q'],
+			Job.RUNNING: ['R'],
+			Job.SUBMITTED: ['H', 'S'],
+			Job.WAITING: ['W'],
+		})
+
+	def _parse(self, proc):
+		for section in accumulate(proc.stdout.iter(self._timeout), '', lambda x, buf: x == '\n'):
+			try:
+				lines = section.replace('\n\t', '').split('\n')
+				job_info = DictFormat(' = ').parse(lines[1:])
+				job_info[CheckInfo.WMSID] = lines[0].split(':')[1].split('.')[0].strip()
+				job_info[CheckInfo.RAW_STATUS] = job_info.pop('job_state')
+				job_info[CheckInfo.QUEUE] = job_info.pop('queue', None)
+				if 'exec_host' in job_info:
+					exec_host = job_info.pop('exec_host').split('/')[0]
+					job_info[CheckInfo.WN] = exec_host + '.' + job_info.get('server', '')
+			except Exception:
+				raise BackendError('Error reading job info:\n%s' % section)
+			yield job_info
+
+
+class PBS(PBSGECommon):  # pylint:disable=too-many-ancestors
+	config_section_list = PBSGECommon.config_section_list + ['PBS']
+
+	def __init__(self, config, name):
+		cancel_executor = CancelJobsWithProcessBlind(config, 'qdel',
+			fmt=lambda wms_id_list: lmap(self._fqid, wms_id_list), unknown_id='Unknown Job Id')
+		PBSGECommon.__init__(self, config, name,
+			cancel_executor=cancel_executor,
+			check_executor=CheckJobsMissingState(config, PBSCheckJobs(config, self._fqid)),
+			nodes_finder=PBSDiscoverNodes(config), queues_finder=PBSDiscoverQueues(config))
+		self._server = config.get('server', '', on_change=None)
+
+	def parse_submit_output(self, data):
+		# 1667161.ekpplusctl.ekpplus.cluster
+		return data.split('.')[0].strip()
+
+	def _fqid(self, wms_id):
+		if not self._server:
+			return wms_id
+		return '%s.%s' % (wms_id, self._server)
+
+	def _get_submit_arguments(self, jobnum, job_name, reqs, sandbox, stdout, stderr):
+		req_map = {WMS.MEMORY: ('pvmem', lambda m: '%dmb' % m)}
+		params = PBSGECommon._get_common_submit_arguments(self, jobnum, job_name,
+			reqs, sandbox, stdout, stderr, req_map)
+		# Job requirements
+		if reqs.get(WMS.QUEUES):
+			params += ' -q %s' % reqs[WMS.QUEUES][0]
+		if reqs.get(WMS.SITES):
+			params += ' -l host=%s' % str.join('+', reqs[WMS.SITES])
+		return params

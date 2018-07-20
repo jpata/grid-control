@@ -1,4 +1,4 @@
-# | Copyright 2007-2016 Karlsruhe Institute of Technology
+# | Copyright 2007-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -12,112 +12,121 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-from grid_control import utils
-from grid_control.job_db import Job
-from hpfwk import AbstractError, Plugin
-from python_compat import imap, irange, lmap, lzip
+import logging
+from grid_control.gc_plugin import NamedPlugin
+from grid_control.job_db import Job, JobClass
+from grid_control.utils.file_tools import SafeFile, with_file
+from grid_control.utils.table import ConsoleTable
+from hpfwk import AbstractError
+from python_compat import imap, irange, lzip
 
-class Report(Plugin):
-	def __init__(self, jobDB = None, task = None, jobs = None, configString = ''):
-		if jobs is None:
-			jobs = jobDB.getJobs()
-		(self._jobDB, self._task, self._jobs) = (jobDB, task, jobs)
-		# FIXME: really store task for later access? maybe just use task during init run?
-		self._header = self._getHeader(45)
 
-	def _getHeader(self, maxLen = 45):
-		if not self._task or not self._task.taskConfigName:
-			return ''
-		tmp = self._task.taskConfigName + ' / ' + self._task.taskID
-		if len(tmp) < maxLen:
-			return tmp
-		tmp = self._task.taskConfigName
-		if len(tmp) < maxLen:
-			return tmp
-		return self._task.taskID
+class Report(NamedPlugin):
+	config_tag_name = 'report'
+	config_section_list = NamedPlugin.config_section_list + ['report']
 
-	def getHeight(self):
-		return 0
+	def __init__(self, config, name, job_db, task=None):
+		NamedPlugin.__init__(self, config, name)
+		self._job_class_list = []
+		for jc_attr in dir(JobClass):
+			if hasattr(getattr(JobClass, jc_attr), 'state_list'):
+				self._job_class_list.append(getattr(JobClass, jc_attr))
 
-	def display(self):
+	def show_report(self, job_db, jobnum_list):
 		raise AbstractError
 
+	def _get_job_state_dict(self, job_db, jobnum_list):
+		result = dict.fromkeys(Job.enum_value_list, 0)
+		result[Job.IGNORED] = len(job_db) - len(jobnum_list)
+		for jobnum in jobnum_list:
+			job_obj = job_db.get_job_transient(jobnum)
+			result[job_obj.state] += 1
+		result[None] = sum(result.values())  # get total
+		for job_class in self._job_class_list:  # sum job class states
+			result[job_class] = sum(imap(lambda job_state: result[job_state], job_class.state_list))
+		return result
 
-class NullReport(Report):
-	alias = ['null']
 
-	def display(self):
-		pass
+class ConsoleReport(Report):
+	def __init__(self, config, name, job_db, task=None):
+		Report.__init__(self, config, name, job_db, task)
+		self._show_line = logging.getLogger('console.report').info
+
+
+class ImageReport(Report):
+	def __init__(self, config, name, job_db, task=None):
+		Report.__init__(self, config, name, job_db, task)
+
+	def _show_image(self, name, buffer):
+		with_file(SafeFile(name, 'wb'), lambda fp: fp.write(buffer.getvalue()))
 
 
 class MultiReport(Report):
-	def __init__(self, reportList, *args, **kwargs):
-		self._reportList = reportList
+	alias_list = ['multi']
 
-	def getHeight(self):
-		return sum(imap(lambda r: r.getHeight(), self._reportList))
+	def __init__(self, config, name, report_list, job_db, task=None):
+		Report.__init__(self, config, name, job_db, task)
+		self._report_list = report_list
 
-	def display(self):
-		for report in self._reportList:
-			report.display()
-
-
-class BasicReport(Report):
-	alias = ['basic']
-
-	def _printHeader(self, message, level = -1):
-		utils.vprint('-'*65, level)
-		utils.vprint(message + self._header.rjust(65 - len(message)), level)
-		utils.vprint(('-'*15).ljust(65), level)
-
-	def getHeight(self):
-		return 14
-
-	def display(self):
-		summary = lmap(lambda x: 0.0, Job.enumNames)
-		defaultJob = Job()
-		for jobNum in self._jobs:
-			summary[self._jobDB.get(jobNum, defaultJob).state] += 1
-		makeSum = lambda *states: sum(imap(lambda z: summary[z], states))
-		makePer = lambda *states: [makeSum(*states), round(makeSum(*states) / len(self._jobDB) * 100.0)]
-
-		# Print report summary
-		self._printHeader('REPORT SUMMARY:')
-		njobs_total = len(self._jobDB)
-		jobov_succ = makePer(Job.SUCCESS)
-		utils.vprint('Total number of jobs:%9d     Successful jobs:%8d  %3d%%' % tuple([njobs_total] + jobov_succ), -1)
-		njobs_assigned = makeSum(Job.SUBMITTED, Job.WAITING, Job.READY, Job.QUEUED, Job.RUNNING)
-		jobov_fail = makePer(Job.ABORTED, Job.CANCELLED, Job.FAILED)
-		utils.vprint('Jobs assigned to WMS:%9d        Failing jobs:%8d  %3d%%' % tuple([njobs_assigned] + jobov_fail), -1)
-		utils.vprint(' ' * 65 + '\nDetailed Status Information:      ', -1, newline = False)
-		ignored = len(self._jobDB) - sum(summary)
-		if ignored:
-			utils.vprint('(Jobs    IGNORED:%8d  %3d%%)' % (ignored, ignored / len(self._jobDB) * 100.0), -1)
-		else:
-			utils.vprint(' ' * 31, -1)
-		for stateNum, category in enumerate(Job.enumNames):
-			utils.vprint('Jobs  %9s:%8d  %3d%%     ' % tuple([category] + makePer(stateNum)), -1, newline = stateNum % 2)
-		utils.vprint('-' * 65, -1)
-		return 0
+	def show_report(self, job_db, jobnum_list):
+		for report in self._report_list:
+			report.show_report(job_db, jobnum_list)
 
 
-class LocationReport(Report):
-	alias = ['location']
+class NullReport(Report):
+	alias_list = ['null']
 
-	def display(self):
-		reports = []
-		for jobNum in self._jobs:
-			jobObj = self._jobDB.get(jobNum)
-			if not jobObj or (jobObj.state == Job.INIT):
-				continue
-			reports.append({0: jobNum, 1: Job.enum2str(jobObj.state), 2: jobObj.wmsId})
-			if utils.verbosity() > 0:
-				history = jobObj.history.items()
-				history.reverse()
-				for at, dest in history:
-					if dest != 'N/A':
-						reports.append({1: at, 2: ' -> ' + dest})
-			elif jobObj.get('dest', 'N/A') != 'N/A':
-				reports.append({2: ' -> ' + jobObj.get('dest')})
-		utils.printTabular(lzip(irange(3), ['Job', 'Status / Attempt', 'Id / Destination']), reports, 'rcl')
-		utils.vprint()
+	def show_report(self, job_db, jobnum_list):
+		pass
+
+
+class TableReport(Report):
+	def __init__(self, config, name, job_db, task=None):
+		Report.__init__(self, config, name, job_db, task)
+		self._show_table = ConsoleTable.create
+
+
+class HeaderReport(ConsoleReport):
+	def __init__(self, config, name, job_db, task=None):
+		ConsoleReport.__init__(self, config, name, job_db, task)
+		(self._task_id, self._task_name) = ('', '')
+		if task is not None:
+			desc = task.get_description()
+			(self._task_id, self._task_name) = (desc.task_id, desc.task_name)
+		self._header = self._get_header(width=65 - 20)
+
+	def _get_header(self, width):
+		tmp = self._task_name + ' / ' + self._task_id
+		if self._task_id and self._task_name and (len(tmp) < width):
+			return tmp
+		elif self._task_name and (len(self._task_name) < width):
+			return self._task_name
+		elif self._task_id:
+			return self._task_id
+		return ''
+
+
+class LocationReport(TableReport):
+	alias_list = ['location']
+
+	def show_report(self, job_db, jobnum_list):
+		report_dict_list = []
+		for jobnum in jobnum_list:
+			job_obj = job_db.get_job_transient(jobnum)
+			if job_obj.state != Job.INIT:
+				report_dict_list.append({0: jobnum, 1: Job.enum2str(job_obj.state), 2: job_obj.gc_id})
+				self._fill_report_dict_list(report_dict_list, job_obj)
+		header_list = ['Job', 'Status / Attempt', 'Id / Destination']
+		self._show_table(lzip(irange(3), header_list), report_dict_list, 'rcl')
+
+	def _fill_report_dict_list(self, report_dict_list, job_obj):
+		if job_obj.get_job_location() != 'N/A':
+			report_dict_list.append({2: ' -> ' + job_obj.get_job_location()})
+
+
+class TrivialReport(TableReport):
+	alias_list = ['trivial']
+
+	def show_report(self, job_db, jobnum_list):
+		self._show_table(lzip(Job.enum_value_list, Job.enum_name_list),
+			[self._get_job_state_dict(job_db, jobnum_list)], pivot=True)

@@ -10,11 +10,12 @@ taken from https://raw.githubusercontent.com/dmwm/WMCore/master/src/python/WMCor
 and modified
 """
 
-import re
-import string
+import re, string
+from hpfwk import clear_current_exception
 try:
     from urlparse import urlparse, urlunparse
 except ImportError:
+    clear_current_exception()
     from urllib.parse import urlparse, urlunparse
 from hpfwk import NestedException
 
@@ -127,7 +128,7 @@ def jobrange(candidate):
 
 def cmsname(candidate):
     """
-    Check candidate as a (partial) CMS name. Should pass:
+    Check candidate as a CMS name. Should pass:
         T2
         T2_UK
         T2_UK_SGrid

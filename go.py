@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# | Copyright 2007-2016 Karlsruhe Institute of Technology
+# | Copyright 2007-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -15,8 +15,19 @@
 
 import os, sys
 
-sys.path.append(os.path.abspath(os.path.join(sys.path[0], 'packages')))
 
-from gcTool import run
+def main():
+	try:  # try to load the globally installed grid_control_api module
+		api_installed = __import__('grid_control_api')
+		del sys.modules['grid_control_api']  # and remove it to load the selected one
+	except Exception:
+		api_installed = None
+	sys.path.insert(1, os.path.abspath(os.path.join(sys.path[0], 'packages')))
+	__import__('hpfwk').clear_current_exception()  # cleanup after failed grid_control_api import
+	api_current = __import__('grid_control_api')
+	do_install_check = (os.environ.get('GC_INSTALL_CHECK', 'true').lower() == 'true')
+	if do_install_check and ((api_installed or api_current) != api_current):
+		sys.stdout.write('Using the grid-control installation at %s\n' % sys.path[0])
+	api_current.gc_run()
 
-run()
+main()

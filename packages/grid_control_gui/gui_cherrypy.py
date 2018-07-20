@@ -1,4 +1,4 @@
-# | Copyright 2013-2016 Karlsruhe Institute of Technology
+# | Copyright 2013-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -13,201 +13,170 @@
 # | limitations under the License.
 
 import time
-from grid_control import utils
 from grid_control.gc_exceptions import InstallationError
-from grid_control.gc_plugin import NamedPlugin
 from grid_control.gui import GUI
 from grid_control.job_db import Job
-from grid_control.utils.process_base import LocalProcess
-from hpfwk import Plugin
-from python_compat import lmap, lzip, set, sorted
+from grid_control.utils import wait
+from python_compat import StringBuffer, imap, lmap, lzip, sorted
 
-try:
-	import cherrypy
-except Exception:
-	cherrypy = None
+
+class CPNavbar(object):
+	def __init__(self, title_link_list, name=None):
+		(self._title_link_list, self._name) = (title_link_list, name)
+
+	def get_body(self):
+		return _tag('div', str.join('\n', imap(lambda title_link:
+			_tag('a', title_link[0], href=title_link[1]), self._title_link_list)),
+			Class='topnav', id=self._name or '')
+
+	def get_stylesheet(self):
+		return str.join('\n', ['.topnav { background-color: #333333; overflow: hidden; }',
+			'.topnav a { float: left; display: block; color: #7799aa; text-align: center;',
+			'padding: 14px 16px; text-decoration: none; font-size: 16px; }',
+			'.topnav a:hover { background-color: #7799aa; color: #333333; }',
+			'.topnav a.active { background-color: #7799aa; color: white; }'])
+
 
 class CPProgressBar(object):
-	def __init__(self, minValue = 0, progress = 0, maxValue = 100, totalWidth = 300):
-		self.width = totalWidth
-		self.done = round(((progress - minValue) / float(maxValue - minValue)) * 100.0)
+	def __init__(self, value_min=0, progress=0, value_max=100, total_width=300):
+		self._width = total_width
+		self._done = round(((progress - value_min) / float(value_max - value_min)) * 100.0)
 
-	def __str__(self):
-		return """
-<div style="width:%dpx;padding:2px;background-color:white;border:1px solid black;text-align:center">
-	<div style="width:%dpx;background-color:green;"> %s%%
-	</div>
-</div>""" % (self.width, int(self.width * self.done / 100), int(self.done))
+	def get_body(self):
+		pbar = _tag('div', '%s%%' % self._done, style='width:%d%%;' % self._done, Class='progressbar')
+		return _tag('div', pbar, Class='progress', style='width:%dpx' % self._width)
 
-
-class TabularHTML(object):
-	def __init__(self, head, data, fmt = None, top = True):
-		self.table = """
-<style type="text/css">
-	table {font-size:12px;color:#333333;border-width: 1px;border-color: #7799aa;border-collapse: collapse;}
-	th {font-size:12px;background-color:#aacccc;border-width: 1px;padding: 8px;border-style: solid;border-color: #7799aa;text-align:left;}
-	tr {background-color:#ffffff;}
-	td {font-size:12px;border-width: 1px;padding: 8px;border-style: solid;border-color: #7799aa;}
-</style>"""
-		fmt = fmt or {}
-		lookupDict = lmap(lambda id_name: (id_name[0], fmt.get(id_name[0], str)), head)
-		headerList = lmap(lambda id_name: '<th>%s</th>' % id_name[1], head)
-		def entryList(entry):
-			return lmap(lambda id_fmt: '<td>%s</td>' % id_fmt[1](entry.get(id_fmt[0])), lookupDict)
-		rowList = [headerList] + lmap(entryList, data)
-		if not top:
-			rowList = lzip(*rowList)
-		rows = lmap(lambda row: '\t<tr>%s</tr>\n' % str.join('', row), rowList)
-		if top:
-			widthStr = 'width:100%;'
-		else:
-			widthStr = ''
-		self.table += '<table style="%s" border="1">\n%s</table>' % (widthStr, str.join('', rows))
-
-	def __str__(self):
-		return self.table
+	def get_stylesheet(self):
+		return str.join('\n', ['.progressbar {background-color:green;}',
+			'.progress {padding:2px;background-color:white;border:1px solid black;text-align:center;}'])
 
 
-def getGraph(instance, graph = None, visited = None):
-	graph = graph or {}
-	visited = visited or set()
-	children = []
-	for attr in dir(instance):
-		child = getattr(instance, attr)
-		try:
-			children.extend(child)
-			children.extend(child.values())
-		except Exception:
-			children.append(child)
-	for child in children:
-		try:
-			if 'grid_control' not in child.__module__:
-				continue
-			if child.__class__.__name__ in ['instancemethod', 'function', 'type']:
-				continue
-			graph.setdefault(instance, []).append(child)
-			if child not in visited:
-				visited.add(child)
-				getGraph(child, graph, visited)
-		except Exception:
-			pass
-	return graph
+class CPTable(object):
+	def __init__(self, head, data, fmt_dict=None, pivot=True):
+		(self._head, self._data, self._fmt_dict, self._pivot) = (head, data, fmt_dict, pivot)
 
+	def get_body(self):
+		fmt_dict = self._fmt_dict or {}
+		lookup_dict = lmap(lambda id_name: (id_name[0], fmt_dict.get(id_name[0], str)), self._head)
+		header_list = lmap(lambda id_name: _tag('th', id_name[1]), self._head)
 
-def getNodeLabel(instance):
-	result = instance.__class__.__name__
-	if isinstance(instance, NamedPlugin):
-		if instance.getObjectName().lower() != instance.__class__.__name__.lower():
-			result += ' (%s)' % instance.getObjectName()
-	return result
+		def _make_entry_list(entry):
+			return lmap(lambda id_fmt: _tag('td', id_fmt[1](entry.get(id_fmt[0]))), lookup_dict)
+		row_list = [header_list] + lmap(_make_entry_list, self._data)
+		width_str = 'width:100%;'
+		if not self._pivot:
+			row_list = lzip(*row_list)
+			width_str = ''
+		return _tag('table', str.join('', lmap(lambda row: _tag('tr', str.join('', row)), row_list)),
+			style=width_str, border=1)
 
-
-def getNodeParent(cls):
-	clsOld = None
-	while (Plugin not in cls.__bases__) and (clsOld != cls):
-		clsOld = cls
-		try:
-			cls = cls.__bases__[0]
-		except Exception:
-			pass
-
-
-def getNodeColor(instance, color_map):
-	cnum = color_map.setdefault(getNodeParent(instance.__class__), max(color_map.values() + [0]) + 1)
-	if cnum < 12:
-		return '/set312/%d' % cnum
-	return '/set19/%d' % (cnum % 12 + 1)
+	def get_stylesheet(self):
+		common = 'font-size:12px;border-color:#7799aa;border-width:1px'
+		return str.join('\n', [
+			'table {%s;color:#333333;border-collapse:collapse;}' % common,
+			'th {%s;background-color:#7799aa;padding:8px;border-style:solid;text-align:left;}' % common,
+			'tr {%s;background-color:#ffffff;}' % common,
+			'td {%s;padding:8px;border-style:solid;}' % common,
+		])
 
 
 class CPWebserver(GUI):
+	alias_list = ['cherrypy']
+
 	def __init__(self, config, workflow):
-		if not cherrypy:
+		try:
+			import cherrypy
+		except Exception:
 			raise InstallationError('cherrypy is not installed!')
+		self._cherrypy = cherrypy
 		GUI.__init__(self, config, workflow)
-		self.counter = 0
+		(self._config, self._workflow, self._counter) = (config, workflow, 0)
+		self._title = self._workflow.task.get_description().task_name
 
-	def processQueue(self, timeout):
-		self.counter += 1
-		utils.wait(timeout)
-
-	def _get_workflow_graph(self):
-		graph = getGraph(self._workflow)
-		classCluster= {}
-		for entry in graph:
-			classCluster.setdefault(getNodeParent(entry.__class__), []).append(entry)
-
-		clusters = ''
-
-		globalNodes = []
-		colors = {}
-		for classClusterEntries in classCluster.values():
-			if len(classClusterEntries) == 1:
-				globalNodes.append(classClusterEntries[0])
-			clusters += 'subgraph cluster_0 {'
-			for node in classClusterEntries:
-				clusters += '%s [label="%s", fillcolor="%s", style="filled"]\n' % (hash(node), getNodeLabel(node), getNodeColor(node, colors))
-			clusters += '}\n'
-
-		edgeStr = ''
-		for entry in graph:
-			for child in graph[entry]:
-				try:
-					hEntry = hash(entry)
-					edgeStr += '%s -> %s\n' % (hEntry, hash(child))
-				except Exception:
-					pass
-		return "digraph mygraph { overlap=False; ranksep=1.5; %s; %s; }\n" % (clusters, edgeStr)
+	def show_config(self):
+		buffer = StringBuffer()
+		try:
+			self._config.write(buffer)
+			return _tag('pre', _tag('code', buffer.getvalue()))
+		finally:
+			buffer.close()
+	show_config.exposed = True
 
 	def image(self):
-		proc = LocalProcess('neato', '-Tpng')
-		proc.stdin.write(self._get_workflow_graph())
-		proc.stdin.close()
-		cherrypy.response.headers['Content-Type'] = 'image/png'
-		return proc.get_output(timeout = 20)
+		self._cherrypy.response.headers['Content-Type'] = 'image/png'
+		return ''
 	image.exposed = True
 
 	def jobs(self, *args, **kw):
-		result = '<body>'
-		result += str(CPProgressBar(0, min(100, self.counter), 100, 300))
+		element_list = [CPProgressBar(0, min(100, self._counter), 100, 300)]
 		if 'job' in kw:
-			jobNum = int(kw['job'])
-			info = self.task.getJobConfig(jobNum)
-			result += str(TabularHTML(lzip(sorted(info), sorted(info)), [info], top = False))
-		def getJobObjs():
-			for jobNum in self.jobMgr.jobDB.getJobs():
-				result = self.jobMgr.jobDB.get(jobNum).__dict__
-				result['jobNum'] = jobNum
+			jobnum = int(kw['job'])
+			info = self._workflow.task.get_job_dict(jobnum)
+			element_list.append(CPTable(lzip(sorted(info), sorted(info)), [info], pivot=False))
+
+		def _fmt_time(value):
+			return time.strftime('%Y-%m-%d %T', time.localtime(value))
+
+		def _iter_job_objs():
+			for jobnum in self._workflow.job_manager.job_db.get_job_list():
+				result = self._workflow.job_manager.job_db.get_job_transient(jobnum).__dict__
+				result['jobnum'] = jobnum
 				result.update(result['dict'])
 				yield result
-		fmtTime = lambda t: time.strftime('%Y-%m-%d %T', time.localtime(t))
-		result += str(TabularHTML([
-				('jobNum', 'Job'), ('state', 'Status'), ('attempt', 'Attempt'),
-				('wmsId', 'WMS ID'), ('dest', 'Destination'), ('submitted', 'Submitted')
-			], getJobObjs(),
-			fmt = {
-				'jobNum': lambda x: '<a href="jobs?job=%s">%s</a>' % (x, x),
-				'state': Job.enum2str, 'submitted': fmtTime
-			}, top = True))
-		result += '</body>'
-		return result
+
+		header_list = [
+			('jobnum', 'Job'), ('state', 'Status'), ('attempt', 'Attempt'),
+			('gc_id', 'WMS ID'), ('SITE', 'Site'), ('QUEUE', 'Queue'), ('submitted', 'Submitted')
+		]
+		fmt_dict = {
+			'jobnum': lambda x: '<a href="jobs?job=%s">%s</a>' % (x, x),
+			'state': Job.enum2str, 'submitted': _fmt_time
+		}
+		element_list.append(CPTable(header_list, _iter_job_objs(), fmt_dict=fmt_dict, pivot=True))
+		return _get_html_page(element_list)
 	jobs.exposed = True
 
+	def show_request_info(self):
+		return _get_html_page([_tag('code', self._cherrypy.request.__dict__)])
+	show_request_info.exposed = True
+
 	def index(self):
-		result = '<body>'
-		result += '<a href="jobs">go to jobs</a>'
-		result += '<div>%s</div>' % cherrypy.request.__dict__
-		result += '</body>'
-		return result
+		return _get_html_page([
+			CPNavbar([('Jobs', 'jobs'), ('Config', 'show_config'), ('Workflow Graph', 'image'),
+				('grid-control task: %s' % self._title, ''), ('Show request info', 'show_request_info')]),
+		])
 	index.exposed = True
 
-	def displayWorkflow(self):
+	def end_interface(self):
+		self._cherrypy.engine.exit()
+		self._cherrypy.server.stop()
+
+	def start_interface(self):
 		basic_auth = {'tools.auth_basic.on': True, 'tools.auth_basic.realm': 'earth',
-			'tools.auth_basic.checkpassword': cherrypy.lib.auth_basic.checkpassword_dict({'user' : '123'})}
-		cherrypy.log.screen = False
-		cherrypy.engine.autoreload.unsubscribe()
-		cherrypy.server.socket_port = 12345
-		cherrypy.tree.mount(self, '/', {'/' : basic_auth})
-		cherrypy.engine.start()
-		self._workflow.jobCycle(wait = self.processQueue)
-		cherrypy.engine.exit()
-		cherrypy.server.stop()
+			'tools.auth_basic.checkpassword':
+				self._cherrypy.lib.auth_basic.checkpassword_dict({'user': '123'})}
+		self._cherrypy.log.screen = False
+		self._cherrypy.engine.timeout_monitor.unsubscribe()
+		self._cherrypy.engine.autoreload.unsubscribe()
+		self._cherrypy.server.socket_port = 12345
+		self._cherrypy.tree.mount(self, '/', {'/': basic_auth})
+		self._cherrypy.engine.start()
+
+	def _process_queue(self, timeout):
+		self._counter += 1
+		wait(timeout)
+
+
+def _get_html_page(html_obj_list):
+	html_stylesheets = str.join('\n', imap(lambda html_obj: html_obj.get_stylesheet(), html_obj_list))
+	html_body = str.join('\n', imap(lambda html_obj: html_obj.get_body(), html_obj_list))
+	return _tag('html',
+		_tag('head', _tag('style', html_stylesheets, Type='text/css')) + _tag('body', '\n' + html_body))
+
+
+def _tag(value, content='', **kwargs):
+	attr_str = str.join('',
+		imap(lambda key_value: ' %s="%s"' % (key_value[0].lower(), key_value[1]), kwargs.items()))
+	if not content:
+		return '<%s%s/>' % (value, attr_str)
+	return '<%s%s>%s</%s>' % (value, attr_str, content, value)

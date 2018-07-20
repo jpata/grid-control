@@ -1,4 +1,4 @@
-# | Copyright 2015-2016 Karlsruhe Institute of Technology
+# | Copyright 2015-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -13,50 +13,78 @@
 # | limitations under the License.
 
 import os, sys, logging
-from hpfwk import NestedException
+from grid_control.utils.data_structures import make_enum
+from hpfwk import NestedException, clear_current_exception, ignore_exception
+from python_compat import imap, izip
 
-class GCLogHandler(logging.FileHandler):
-	def __init__(self, fn, *args, **kwargs):
-		if not fn:
-			found = False
-			for fn in [os.path.join(os.environ['GC_PACKAGES_PATH'], '..', 'debug.log'), '/tmp/gc.debug.%d' % os.getuid(), '~/gc.debug']:
-				try:
-					fn = os.path.abspath(os.path.normpath(os.path.expanduser(fn)))
-					logging.FileHandler.__init__(self, fn, *args, **kwargs)
-					found = True
-					break
-				except Exception:
-					continue
-			if not found:
-				raise NestedException('Unable to find writeable debug log path!')
-		else:
-			logging.FileHandler.__init__(self, fn, *args, **kwargs)
-		self._fn = os.path.abspath(fn)
 
-	def emit(self, record):
-		logging.FileHandler.emit(self, record)
-		sys.stderr.write('In case this is caused by a bug, please send the log file:\n')
-		sys.stderr.write('\t"%s"\nto grid-control-dev@googlegroups.com\n' % self._fn)
+INITIAL_EXCEPTHOOK = sys.excepthook
 
-# Exception handler for interactive mode:
-def gc_excepthook(*exc_info):
-	sys.excepthook = sys.__excepthook__
-	try:
-		version = __import__('grid_control').__version__
-	except Exception:
-		version = 'Unknown version'
-	log = logging.getLogger('exception')
-	if not log.handlers:
-		log.addHandler(logging.StreamHandler(sys.stderr))
-	log.handle(log.makeRecord('exception', logging.CRITICAL, __file__, None,
-		'Exception occured in grid-control [%s]' % version, tuple(), exc_info))
-sys.excepthook = gc_excepthook
 
 class GCError(NestedException):
-	pass	# grid-control exception base class
+	pass  # grid-control exception base class
 
-class UserError(GCError):
-	pass	# some error caused by the user
 
 class InstallationError(GCError):
-	pass	# some error with installed programs
+	pass  # some error with installed programs
+
+
+class UserError(GCError):
+	pass  # some error caused by the user
+
+
+def gc_excepthook(*exc_info):
+	# Exception handler for interactive mode:
+	if hasattr(gc_excepthook, 'restore_old_hook') and getattr(gc_excepthook, 'restore_old_hook'):
+		sys.excepthook = INITIAL_EXCEPTHOOK
+	version = ignore_exception(Exception, 'unknown version',
+		lambda: sys.modules['grid_control'].__version__)
+	log = logging.getLogger('abort')
+	if not log.handlers and not (log.propagate and logging.getLogger().handlers):
+		log.addHandler(logging.StreamHandler(sys.stderr))
+	log.handle(log.makeRecord('exception', logging.CRITICAL, __file__, None,
+		'Exception occured in grid-control [%s]\n\n' % version, tuple(), exc_info))
+sys.excepthook = gc_excepthook  # <alias>
+
+
+class GCLogHandler(logging.FileHandler):
+	config_instances = []
+
+	# This handler stores several pieces of debug information in a file
+	def __init__(self, fn_candidates, mode='a', *args, **kwargs):
+		(self._fn, self._mode) = (None, mode)
+		for fn_candidate in fn_candidates:
+			try:
+				fn_candidate = os.path.abspath(os.path.normpath(os.path.expanduser(fn_candidate)))
+				logging.FileHandler.__init__(self, fn_candidate, 'a', *args, **kwargs)
+				self._fn = fn_candidate
+				break
+			except Exception:
+				clear_current_exception()
+		if self._fn is None:
+			raise Exception('Unable to find writeable debug log path!')
+
+	def emit(self, record):
+		fp = open(self._fn, self._mode)
+		try:
+			try:
+				for idx, instance in enumerate(GCLogHandler.config_instances):
+					fp.write('-' * 70 + '\nConfig instance %d\n' % idx + '=' * 70 + '\n')
+					instance.write(fp)
+			except Exception:
+				fp.write('-> unable to display configuration!\n')
+				clear_current_exception()
+		finally:
+			if GCLogHandler.config_instances:
+				fp.write('\n' + '*' * 70 + '\n')
+		if make_enum.enum_list:
+			fp.write('\nList of enums\n')
+			for enum in make_enum.enum_list:
+				fp.write('\t%s\n' % str.join('|', imap(lambda name_value: '%s:%s' % name_value,
+					izip(enum.enum_name_list, enum.enum_value_list))))
+			fp.write('\n' + '*' * 70 + '\n')
+		fp.write('\n')
+		fp.close()
+		logging.FileHandler.emit(self, record)
+		sys.stderr.write('\nIn case this is caused by a bug, please send the log file:\n' +
+			'\t%r\n' % self._fn + 'to grid-control-dev@googlegroups.com\n')

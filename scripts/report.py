@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# | Copyright 2009-2016 Karlsruhe Institute of Technology
+# | Copyright 2009-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -14,44 +14,32 @@
 # | limitations under the License.
 
 import sys
-from gcSupport import JobSelector, Options, Plugin, getConfig, scriptOptions, utils
+from gc_scripts import ScriptOptions, display_plugin_list_for, get_script_object
 
-parser = Options(usage = '%s [OPTIONS] <config file>')
-parser.addBool(None, 'L', 'report-list',  default = False, help = 'List available report classes')
-parser.addBool(None, 'T', 'use-task',     default = False, help = 'Forward task information to report')
-parser.addText(None, 'R', 'report',       default = 'GUIReport')
-parser.addText(None, 'J', 'job-selector', default = None)
-parser.addText(None, ' ', 'string',       default = '')
-options = scriptOptions(parser)
 
-Report = Plugin.getClass('Report')
+def _main():
+	parser = ScriptOptions(usage='%s [OPTIONS] <config file>')
+	parser.add_bool(None, 'L', 'report-list', default=False,
+		help='List available report classes')
+	parser.add_bool(None, 'T', 'use-task', default=False,
+		help='Forward task information to report')
+	parser.add_text(None, 'R', 'report', default='modern')
+	parser.add_text(None, 'J', 'job-selector', default=None)
+	options = parser.script_parse()
 
-if options.opts.report_list:
-	msg = 'Available report classes:\n'
-	for entry in Report.getClassList():
-		msg += ' * %s\n' % str.join(' ', entry.values())
-	print(msg)
+	if options.opts.report_list:
+		display_plugin_list_for('Report', title='Available report classes')
 
-if len(options.args) != 1:
-	utils.exitWithUsage(parser.usage())
+	if len(options.args) != 1:
+		parser.exit_with_usage()
 
-def main(opts, args):
-	# try to open config file
-	config = getConfig(args[0], section = 'global')
+	script_obj = get_script_object(config_file=options.args[0],
+		job_selector_str=options.opts.job_selector, require_task=options.opts.use_task)
+	report = script_obj.new_config.get_composited_plugin('transient report',
+		options.opts.report, 'MultiReport', cls='Report',
+		pargs=(script_obj.job_db, script_obj.task))
+	report.show_report(script_obj.job_db, script_obj.job_db.get_job_list())
 
-	# Initialise task module
-	task = None
-	if opts.use_task:
-		task = config.getPlugin(['task', 'module'], cls = 'TaskModule')
-
-	# Initialise job database
-	jobDB = config.getPlugin('job database', 'JobDB', cls = 'JobDB')
-	activity = utils.ActivityLog('Filtering job entries')
-	selected = jobDB.getJobs(JobSelector.create(opts.job_selector, task = task))
-	activity.finish()
-
-	report = Report.createInstance(opts.report, jobDB, task, selected, opts.string)
-	report.display()
 
 if __name__ == '__main__':
-	sys.exit(main(options.opts, options.args))
+	sys.exit(_main())

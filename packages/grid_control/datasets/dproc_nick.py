@@ -12,60 +12,53 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
+from grid_control.config import join_config_locations
 from grid_control.datasets.dproc_base import DataProcessor
-from grid_control.datasets.provider_base import DataProvider, DatasetError
+from grid_control.datasets.provider_base import DataProvider
 from hpfwk import AbstractError
 
+
 class NickNameProducer(DataProcessor):
-	def __init__(self, config):
-		DataProcessor.__init__(self, config)
-		# Ensure the same nickname is used consistently in all blocks of a dataset
-		self._checkConsistency = config.getBool('nickname check consistency', True)
-		self._checkConsistencyData = {}
-		# Check if two different datasets have the same nickname
-		self._checkCollision = config.getBool('nickname check collision', True)
-		self._checkCollisionData = {}
+	def get_name(self, current_nickname, dataset, block):
+		raise AbstractError  # Overwritten by users / other implementations
 
-	# Get nickname and check for collisions
-	def processBlock(self, block):
-		blockDS = block[DataProvider.Dataset]
-		oldNick = block.get(DataProvider.Nickname, '')
-		newNick = self.getName(oldNick, blockDS, block)
-		# Check if nickname is used consistenly in all blocks of a datasets
-		if self._checkConsistency:
-			if self._checkConsistencyData.setdefault(blockDS, newNick) != newNick:
-				raise DatasetError('Different blocks of dataset "%s" have different nicknames: "%s" != "%s"' % (
-					blockDS, self._checkConsistencyData[blockDS], newNick))
-		if self._checkCollision:
-			if self._checkCollisionData.setdefault(newNick, blockDS) != blockDS:
-				raise DatasetError('Multiple datasets use the same nickname "%s": "%s" != "%s"' % (
-					newNick, self._checkCollisionData[newNick], blockDS))
-		block[DataProvider.Nickname] = newNick
+	def process_block(self, block):  # Get nickname and check for collisions
+		dataset = block[DataProvider.Dataset]
+		current_nickname = block.get(DataProvider.Nickname, '')
+		# legacy API
+		for api in ['getName', 'get_name']:
+			if hasattr(self, api):
+				block[DataProvider.Nickname] = getattr(self, api)(current_nickname, dataset, block)
+				break
 		return block
-
-	# Overwritten by users / other implementations
-	def getName(self, oldnick, dataset, block):
-		raise AbstractError
-
-
-class SimpleNickNameProducer(NickNameProducer):
-	def __init__(self, config):
-		NickNameProducer.__init__(self, config)
-		self._full_name = config.getBool('nickname full name', True)
-
-	def getName(self, oldnick, dataset, block):
-		if oldnick == '':
-			ds = dataset.replace('/PRIVATE/', '').lstrip('/').split('#')[0]
-			if self._full_name:
-				return ds.replace(' ', '').replace('/', '_').replace('__', '_')
-			return ds.split('/')[0]
-		return oldnick
 
 
 class InlineNickNameProducer(NickNameProducer):
-	def __init__(self, config):
-		NickNameProducer.__init__(self, config)
-		self._expr = config.get('nickname expr', 'oldnick')
+	alias_list = ['inline']
 
-	def getName(self, oldnick, dataset, block):
-		return eval(self._expr) # pylint:disable=eval-used
+	def __init__(self, config, datasource_name):
+		NickNameProducer.__init__(self, config, datasource_name)
+		self._expr = config.get(
+			join_config_locations(['', datasource_name], 'nickname expr'), 'current_nickname')
+
+	def get_name(self, current_nickname, dataset, block):
+		return eval(self._expr, {  # pylint:disable=eval-used
+			'oldnick': current_nickname, 'current_nickname': current_nickname,
+			'dataset': dataset, 'block': block, 'DataProvider': DataProvider})
+
+
+class SimpleNickNameProducer(NickNameProducer):
+	alias_list = ['simple']
+
+	def __init__(self, config, datasource_name):
+		NickNameProducer.__init__(self, config, datasource_name)
+		self._full_name = config.get_bool(
+			join_config_locations(['', datasource_name], 'nickname full name'), True)
+
+	def get_name(self, current_nickname, dataset_name, block):
+		if current_nickname == '':
+			dataset_name = dataset_name.replace('/PRIVATE/', '').lstrip('/').split('#')[0]
+			if self._full_name:
+				return dataset_name.replace(' ', '').replace('/', '_').replace('__', '_')
+			return dataset_name.split('/')[0]
+		return current_nickname

@@ -1,4 +1,4 @@
-# | Copyright 2009-2016 Karlsruhe Institute of Technology
+# | Copyright 2009-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -12,145 +12,126 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-import re, sys, time, signal
-from grid_control import utils
-from grid_control.gui import GUI
-from grid_control_gui.ansi import Console
-from python_compat import identity, ifilter, imap, itemgetter
-
-class GUIStream(object):
-	def __init__(self, stream, screen):
-		(self.stream, self.screen, self.logged) = (stream, screen, True)
-
-		# This is a list of (regular expression, GUI attributes).  The
-		# attributes are applied to matches of the regular expression in
-		# the output written into this stream.  Lookahead expressions
-		# should not overlap with other regular expressions.
-		self.attrs = [
-			(r'DONE(?!:)', [Console.COLOR_BLUE, Console.BOLD]),
-			(r'FAILED(?!:)', [Console.COLOR_RED, Console.BOLD]),
-			(r'SUCCESS(?!:)', [Console.COLOR_GREEN, Console.BOLD]),
-			(r'(?<=DONE:)\s+[1-9]\d*', [Console.COLOR_BLUE, Console.BOLD]),
-			(r'(?<=Failing jobs:)\s+[1-9]\d*', [Console.COLOR_RED, Console.BOLD]),
-			(r'(?<=FAILED:)\s+[1-9]\d*', [Console.COLOR_RED, Console.BOLD]),
-			(r'(?<=Successful jobs:)\s+[1-9]\d*', [Console.COLOR_GREEN, Console.BOLD]),
-			(r'(?<=SUCCESS:)\s+[1-9]\d*', [Console.COLOR_GREEN, Console.BOLD]),
-		]
-		self.regex = re.compile('(%s)' % '|'.join(imap(itemgetter(0), self.attrs)))
-
-	def _attributes(self, string, pos):
-		""" Retrieve the attributes for a match in string at position pos. """
-		for (expr, attr) in self.attrs:
-			match = re.search(expr, string)
-			if match and match.start() == pos:
-				return attr
-		return 0
-
-	def write(self, data):
-		if self.logged:
-			GUIStream.backlog.pop(0)
-			GUIStream.backlog.append(data)
-		idx = 0
-		match = self.regex.search(data[idx:])
-		while match:
-			self.screen.addstr(data[idx:idx + match.start()])
-			self.screen.addstr(match.group(0), self._attributes(data[idx:], match.start()))
-			idx += match.end()
-			match = self.regex.search(data[idx:])
-		self.screen.addstr(data[idx:])
-		return True
-
-	def __getattr__(self, name):
-		return self.stream.__getattribute__(name)
-
-	def dump(cls):
-		for data in ifilter(identity, GUIStream.backlog):
-			sys.stdout.write(data)
-		sys.stdout.write('\n')
-	dump = classmethod(dump)
-GUIStream.backlog = [None] * 100
+import sys, signal, threading
+from grid_control.gui import GUI, GUIException
+from grid_control.logging_setup import GCStreamHandler
+from grid_control.utils import abort, is_dumb_terminal
+from grid_control.utils.thread_tools import GCEvent, GCLock, start_daemon, with_lock
+from grid_control_gui.ansi import ANSI, Console, install_console_reset
+from grid_control_gui.ge_base import GUIElement
+from hpfwk import ExceptionCollector, rethrow
+from python_compat import StringBuffer
 
 
 class ANSIGUI(GUI):
+	alias_list = ['ansi']
+
+	def __new__(cls, config, workflow):
+		if is_dumb_terminal():
+			return GUI.create_instance('BasicConsoleGUI', config, workflow)
+		return GUI.__new__(cls)
+
 	def __init__(self, config, workflow):
-		config.set('report', 'BasicBarReport')
 		GUI.__init__(self, config, workflow)
-		self._reportHeight = None
+		install_console_reset()
+		self._console_lock = GCLock(threading.RLock())  # terminal output lock
+		self._exc = ExceptionCollector()
+		(self._redraw_thread, self._redraw_shutdown) = (None, False)
+		(self._redraw_event, self._immediate_redraw_event) = (GCEvent(rlock=True), GCEvent(rlock=True))
+		self._redraw_interval = config.get_float('gui redraw interval', 0.1, on_change=None)
+		self._redraw_delay = config.get_float('gui redraw delay', 0.05, on_change=None)
+		element = config.get_composited_plugin('gui element', 'report activity log',
+			'MultiGUIElement', cls=GUIElement, on_change=None, bind_kwargs={'inherit': True},
+			pargs=(workflow, self._redraw_event, sys.stdout))
+		self._element = FrameGUIElement(config, 'gui', workflow,
+			self._redraw_event, sys.stdout, self._immediate_redraw_event, element)
 
-	def getHeight(self):
-		return self._reportHeight
-
-	def displayWorkflow(self):
-		gui = self
-		report = self._report
-		workflow = self._workflow
-		def wrapper(screen):
-			# Event handling for resizing
-			def onResize(sig, frame):
-				self._reportHeight = report.getHeight()
-				screen.savePos()
-				(sizey, sizex) = screen.getmaxyx()
-				screen.setscrreg(min(self.getHeight() + 2, sizey), sizey)
-				utils.printTabular.wraplen = sizex - 5
-				screen.loadPos()
-			screen.erase()
-			onResize(None, None)
-
-			def guiWait(timeout):
-				onResize(None, None)
-				oldHandler = signal.signal(signal.SIGWINCH, onResize)
-				result = utils.wait(timeout)
-				signal.signal(signal.SIGWINCH, oldHandler)
-				if (time.time() - guiWait.lastwait > 10) and not timeout:
-					tmp = utils.ActivityLog('') # force display update
-					tmp.finish()
-				guiWait.lastwait = time.time()
-				return result
-			guiWait.lastwait = 0
-
-			# Wrapping ActivityLog functionality
-			class GUILog(object):
-				def __init__(self, message):
-					self._message = '%s...' % message
-					self.show(self._message)
-
-				def finish(self):
-					if hasattr(sys.stdout, 'logged') and self._message:
-						self.show(' ' * len(self._message))
-						self._message = []
-
-				def __del__(self):
-					self.finish()
-
-				def show(self, message):
-					if gui.getHeight() != report.getHeight():
-						screen.erase()
-						onResize(None, None)
-						sys.stdout.dump()
-					screen.savePos()
-					screen.move(0, 0)
-					sys.stdout.logged = False
-					report.display()
-					screen.move(gui.getHeight() + 1, 0)
-					sys.stdout.write('%s\n' % message.center(65))
-					sys.stdout.logged = True
-					screen.loadPos()
-
-			# Main cycle - GUI mode
-			saved = (sys.stdout, sys.stderr, utils.ActivityLog)
+	def end_interface(self):  # lots of try ... except .. finally - for clean console state restore
+		def _end_interface():
 			try:
-				utils.ActivityLog = GUILog
-				sys.stdout = GUIStream(saved[0], screen)
-				sys.stderr = GUIStream(saved[1], screen)
-				workflow.jobCycle(guiWait)
+				self._finish_drawing()
 			finally:
-				sys.stdout, sys.stderr, utils.ActivityLog = saved
-				screen.setscrreg()
-				screen.move(1, 0)
-				screen.eraseDown()
-				report.display()
-				sys.stdout.write('\n')
+				GCStreamHandler.set_global_lock()
+				Console.reset_console()
+		rethrow(GUIException('GUI shutdown exception'), _end_interface)
+		self._exc.raise_any(GUIException('GUI drawing exception'))
+
+	def start_interface(self):
+		GCStreamHandler.set_global_lock(self._console_lock)
+		with_lock(self._console_lock, self._element.draw_startup)
+		self._redraw_shutdown = False  # start redraw thread
+		self._redraw_thread = start_daemon('GUI draw thread', self._redraw)
+
+	def _finish_drawing(self):
+		def _final_draw():
+			try:
+				self._element.make_dirty()
+			finally:
+				self._redraw_shutdown = True  # stop redraw thread
+				self._redraw_event.set()
 		try:
-			wrapper(Console())
+			try:
+				with_lock(self._console_lock, _final_draw)  # last redraw
+			finally:
+				if self._redraw_thread:
+					self._redraw_thread.join(5 + self._redraw_interval)
 		finally:
-			GUIStream.dump()
+			with_lock(self._console_lock, self._element.draw_finish)  # draw finish
+
+	def _redraw(self):
+		try:
+			while not self._redraw_shutdown:
+				self._redraw_event.wait(timeout=self._redraw_interval)
+				self._immediate_redraw_event.wait(timeout=self._redraw_delay)
+				with_lock(self._console_lock, self._element.redraw)
+				self._immediate_redraw_event.clear()
+				self._redraw_event.clear()
+		except Exception:
+			self._exc.collect()
+			abort(True)
+
+
+class FrameGUIElement(GUIElement):
+	def __init__(self, config, name, workflow, redraw_event, stream, immediate_redraw_event, element):
+		GUIElement.__init__(self, config, name, workflow, redraw_event, stream)
+		(self._immediate_redraw_event, self._element) = (immediate_redraw_event, element)
+		self._dump_stream = config.get_bool('gui dump stream', True, on_change=None)
+		self._console_dim_fn = Console.getmaxyx
+		(self._std_stream, self._old_resize_handler) = (StringBuffer(), None)
+
+	def draw_finish(self):
+		signal.signal(signal.SIGWINCH, self._old_resize_handler)  # restore old resize handler
+		try:
+			self._element.draw_finish()
+		finally:
+			GCStreamHandler.pop_std_stream()
+			if self._dump_stream:  # display logging output
+				sys.stderr.write(self._std_stream.getvalue())
+			self._stream.write('\n')
+
+	def draw_startup(self):
+		GUIElement.draw_startup(self)
+		self._old_resize_handler = signal.signal(signal.SIGWINCH, self._on_size_change)  # resize handler
+		GCStreamHandler.push_std_stream(self._std_stream, self._std_stream)  # hide all logging output
+		self._on_size_change()  # initial setup of element size
+		self._element.draw_startup()
+
+	def make_dirty(self):
+		self._element.make_dirty()
+
+	def redraw(self):  # redraw and go to waiting position
+		self._element.redraw()
+		self._stream.write(ANSI.move(self._element.get_height() or self._console_dim_fn()[0], 0))
+		sys.stdout.flush()
+		sys.stderr.flush()
+
+	def set_layout(self, pos, height, width, on_height_change=None):
+		return self._element.set_layout(pos, height, width, on_height_change)
+
+	def _draw(self):
+		pass
+
+	def _on_size_change(self, *args, **kwargs):
+		self.set_layout(0, *self._console_dim_fn())
+		self._immediate_redraw_event.set()  # all locks (incl. event lock) in signals have to be RLocks!
+		self._redraw_event.set()  # trigger immediate redraw

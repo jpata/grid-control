@@ -1,4 +1,4 @@
-# | Copyright 2015-2016 Karlsruhe Institute of Technology
+# | Copyright 2015-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -12,212 +12,172 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
+import logging
 from grid_control.datasets.dproc_base import DataProcessor
-from grid_control.datasets.provider_base import DataProvider, DatasetError
-from grid_control.utils.data_structures import makeEnum
-from python_compat import imap, itemgetter, lfilter, md5_hex, set
-
-class StatsDataProcessor(DataProcessor):
-	alias = ['stats']
-
-	def __init__(self, config):
-		DataProcessor.__init__(self, config)
-		self.reset()
-
-	def reset(self):
-		self._entries = 0
-		self._blocks = 0
-
-	def getStats(self):
-		if self._entries < 0:
-			units = '%d file(s)' % -self._entries
-		else:
-			units = '%d event(s)' % self._entries
-		result = (self._blocks, units)
-		self.reset()
-		return result
-
-	def process(self, blockIter):
-		for block in blockIter:
-			if block:
-				self._blocks += 1
-				self._entries += block[DataProvider.NEntries]
-				yield block
-
-
-class EntriesConsistencyDataProcessor(DataProcessor):
-	alias = ['consistency']
-
-	def processBlock(self, block):
-		# Check entry consistency
-		events = sum(imap(lambda x: x[DataProvider.NEntries], block[DataProvider.FileList]))
-		if block.setdefault(DataProvider.NEntries, events) != events:
-			self._log.warning('Inconsistency in block %s#%s: Number of events doesn\'t match (b:%d != f:%d)',
-				block[DataProvider.Dataset], block[DataProvider.BlockName], block[DataProvider.NEntries], events)
-		return block
-
-
-class URLDataProcessor(DataProcessor):
-	alias = ['ignore', 'FileDataProcessor']
-
-	def __init__(self, config):
-		DataProcessor.__init__(self, config)
-		internal_config = config.changeView(viewClass = 'SimpleConfigView', setSections = ['dataprocessor'])
-		internal_config.set('dataset processor', 'NullDataProcessor')
-		self._url_filter = config.getFilter(['dataset ignore urls', 'dataset ignore files'], '', negate = True,
-			filterParser = lambda value: self._parseFilter(internal_config, value),
-			filterStr = lambda value: str.join('\n', value.split()),
-			matchKey = itemgetter(DataProvider.URL),
-			defaultMatcher = 'blackwhite', defaultFilter = 'weak')
-
-	def _parseFilter(self, config, value):
-		def getFilterEntries():
-			for pat in value.split():
-				if ':' not in pat.lstrip(':'):
-					yield pat
-				else:
-					for dfac in DataProvider.bind(':%s' % pat.lstrip(':'), config = config):
-						dproc = dfac.getBoundInstance()
-						for block in dproc.getBlocks():
-							for fi in block[DataProvider.FileList]:
-								yield fi[DataProvider.URL]
-		return str.join('\n', getFilterEntries())
-
-	def processBlock(self, block):
-		if self._url_filter.getSelector():
-			block[DataProvider.FileList] = self._url_filter.filterList(block[DataProvider.FileList])
-		return block
-
-
-class URLCountDataProcessor(DataProcessor):
-	alias = ['files', 'FileCountDataProcessor']
-
-	def __init__(self, config):
-		DataProcessor.__init__(self, config)
-		self._limitFiles = config.getInt(['dataset limit urls', 'dataset limit files'], -1)
-
-	def processBlock(self, block):
-		if self._limitFiles != -1:
-			block[DataProvider.FileList] = block[DataProvider.FileList][:self._limitFiles]
-			self._limitFiles -= len(block[DataProvider.FileList])
-		return block
-
-
-class EntriesCountDataProcessor(DataProcessor):
-	alias = ['events', 'EventsCountDataProcessor']
-
-	def __init__(self, config):
-		DataProcessor.__init__(self, config)
-		self._limitEntries = config.getInt(['dataset limit entries', 'dataset limit events'], -1)
-
-	def processBlock(self, block):
-		if self._limitEntries != -1:
-			block[DataProvider.NEntries] = 0
-			def filterEvents(fi):
-				if self._limitEntries == 0: # already got all requested events
-					return False
-				# truncate file to requested #entries if file has more events than needed
-				if fi[DataProvider.NEntries] > self._limitEntries:
-					fi[DataProvider.NEntries] = self._limitEntries
-				block[DataProvider.NEntries] += fi[DataProvider.NEntries]
-				self._limitEntries -= fi[DataProvider.NEntries]
-				return True
-			block[DataProvider.FileList] = lfilter(filterEvents, block[DataProvider.FileList])
-		return block
+from grid_control.datasets.provider_base import DataProvider
+from python_compat import imap, itemgetter, lfilter
 
 
 class EmptyDataProcessor(DataProcessor):
-	alias = ['empty']
+	alias_list = ['empty']
 
-	def __init__(self, config):
-		DataProcessor.__init__(self, config)
-		self._emptyFiles = config.getBool('dataset remove empty files', True)
-		self._emptyBlock = config.getBool('dataset remove empty blocks', True)
+	def __init__(self, config, datasource_name):
+		DataProcessor.__init__(self, config, datasource_name)
+		self._empty_files = config.get_bool(self._get_dproc_opt('remove empty files'), True)
+		self._empty_block = config.get_bool(self._get_dproc_opt('remove empty blocks'), True)
+		(self._removed_files, self._removed_blocks) = (0, 0)
 
-	def processBlock(self, block):
-		if self._emptyFiles:
-			block[DataProvider.FileList] = lfilter(lambda fi: fi[DataProvider.NEntries] != 0, block[DataProvider.FileList])
-		if self._emptyBlock:
+	def __repr__(self):
+		return self._repr_base('files=%s, blocks=%s' % (self._empty_files, self._empty_block))
+
+	def process_block(self, block):
+		if self._empty_files:
+			def _has_entries(fi):
+				return fi[DataProvider.NEntries] != 0
+			n_files = len(block[DataProvider.FileList])
+			block[DataProvider.FileList] = lfilter(_has_entries, block[DataProvider.FileList])
+			self._removed_files += n_files - len(block[DataProvider.FileList])
+		if self._empty_block:
 			if (block[DataProvider.NEntries] == 0) or not block[DataProvider.FileList]:
+				self._removed_blocks += 1
 				return
 		return block
 
+	def _enabled(self):
+		return self._empty_block or self._empty_files
+
+	def _finished(self):
+		if self._removed_files or self._removed_blocks:
+			self._log.log(logging.INFO1, 'Empty files removed: %d, Empty blocks removed %d',
+				self._removed_files, self._removed_blocks)
+		(self._removed_files, self._removed_blocks) = (0, 0)
+
+
+class EntriesCountDataProcessor(DataProcessor):
+	alias_list = ['events', 'EventsCountDataProcessor']
+
+	def __init__(self, config, datasource_name):
+		DataProcessor.__init__(self, config, datasource_name)
+		self._limit_entries = config.get_int(self._get_dproc_opt(['limit events', 'limit entries']), -1)
+
+	def process_block(self, block):
+		if self.enabled():
+			block[DataProvider.NEntries] = 0
+
+			def _filter_events(fi):
+				if self._limit_entries == 0:  # already got all requested events
+					return False
+				# truncate file to requested #entries if file has more events than needed
+				if fi[DataProvider.NEntries] > self._limit_entries:
+					fi[DataProvider.NEntries] = self._limit_entries
+				block[DataProvider.NEntries] += fi[DataProvider.NEntries]
+				self._limit_entries -= fi[DataProvider.NEntries]
+				return True
+			block[DataProvider.FileList] = lfilter(_filter_events, block[DataProvider.FileList])
+		return block
+
+	def _enabled(self):
+		return self._limit_entries != -1
+
 
 class LocationDataProcessor(DataProcessor):
-	alias = ['location']
+	alias_list = ['location']
 
-	def __init__(self, config):
-		DataProcessor.__init__(self, config)
-		self._locationfilter = config.getFilter('dataset location filter', '',
-			defaultMatcher = 'blackwhite', defaultFilter = 'strict')
+	def __init__(self, config, datasource_name):
+		DataProcessor.__init__(self, config, datasource_name)
+		self._location_filter = config.get_filter(self._get_dproc_opt('location filter'), '',
+			default_matcher='BlackWhiteMatcher', default_filter='StrictListFilter')
 
-	def processBlock(self, block):
+	def process_block(self, block):
 		if block[DataProvider.Locations] is not None:
-			sites = self._locationfilter.filterList(block[DataProvider.Locations])
+			sites = self._location_filter.filter_list(block[DataProvider.Locations])
 			if (sites is not None) and (len(sites) == 0) and (len(block[DataProvider.FileList]) != 0):
+				error_msg = 'Block %s is not available ' % DataProvider.get_block_id(block)
 				if not len(block[DataProvider.Locations]):
-					self._log.warning('Block %s#%s is not available at any site!',
-						block[DataProvider.Dataset], block[DataProvider.BlockName])
+					self._log.warning(error_msg + 'at any site!')
 				elif not len(sites):
-					self._log.warning('Block %s#%s is not available at any selected site!',
-						block[DataProvider.Dataset], block[DataProvider.BlockName])
+					self._log.warning(error_msg + 'at any selected site!')
 			block[DataProvider.Locations] = sites
 		return block
 
 
-# Enum to specify how to react to multiple occurences of something
-DatasetUniqueMode = makeEnum(['warn', 'abort', 'skip', 'ignore', 'record'], useHash = True)
+class URLCountDataProcessor(DataProcessor):
+	alias_list = ['files', 'FileCountDataProcessor']
 
-class UniqueDataProcessor(DataProcessor):
-	alias = ['unique']
+	def __init__(self, config, datasource_name):
+		DataProcessor.__init__(self, config, datasource_name)
+		self._limit_files = config.get_int(self._get_dproc_opt(['limit files', 'limit urls']), -1)
+		self._limit_files_fraction = config.get_float(
+			self._get_dproc_opt(['limit files fraction', 'limit urls fraction']), -1.)
+		(self._limit_files_per_ds, self._files_per_ds) = ({}, {})
 
-	def __init__(self, config):
-		DataProcessor.__init__(self, config)
-		self._checkURLOpt = 'dataset check unique url'
-		self._checkURL = config.getEnum(self._checkURLOpt, DatasetUniqueMode, DatasetUniqueMode.abort)
-		self._checkBlockOpt = 'dataset check unique block'
-		self._checkBlock = config.getEnum(self._checkBlockOpt, DatasetUniqueMode, DatasetUniqueMode.abort)
+	def process(self, block_iter):
+		(self._limit_files_per_ds, self._files_per_ds) = ({}, {})  # reset counters
+		if self._limit_files_fraction >= 0:
+			block_list = list(DataProcessor.process(self, block_iter))
+			goal_per_ds = {}  # calculate file limit per dataset
+			for (dataset_name, fn_list_len) in self._files_per_ds.items():
+				goal_per_ds[dataset_name] = int(self._limit_files_fraction * fn_list_len) or 1
+			for block in block_list:
+				self._reduce_fn_list(block, goal_per_ds)
+				yield block
+		else:
+			for block in DataProcessor.process(self, block_iter):
+				yield block
 
-	def process(self, blockIter):
-		self._recordedURL = set()
-		self._recordedBlock = set()
-		return DataProcessor.process(self, blockIter)
-
-	def processBlock(self, block):
-		# Check uniqueness of URLs
-		recordedBlockURL = []
-		if self._checkURL != DatasetUniqueMode.ignore:
-			def processFI(fiList):
-				for fi in fiList:
-					urlHash = md5_hex(repr((fi[DataProvider.URL], fi[DataProvider.NEntries], fi.get(DataProvider.Metadata))))
-					if urlHash in self._recordedURL:
-						msg = 'Multiple occurences of URL: %r!' % fi[DataProvider.URL]
-						msg += ' (This check can be configured with %r)' % self._checkURLOpt
-						if self._checkURL == DatasetUniqueMode.warn:
-							self._log.warning(msg)
-						elif self._checkURL == DatasetUniqueMode.abort:
-							raise DatasetError(msg)
-						elif self._checkURL == DatasetUniqueMode.skip:
-							continue
-					self._recordedURL.add(urlHash)
-					recordedBlockURL.append(urlHash)
-					yield fi
-			block[DataProvider.FileList] = list(processFI(block[DataProvider.FileList]))
-			recordedBlockURL.sort()
-
-		# Check uniqueness of blocks
-		if self._checkBlock != DatasetUniqueMode.ignore:
-			blockHash = md5_hex(repr((block.get(DataProvider.Dataset), block[DataProvider.BlockName],
-				recordedBlockURL, block[DataProvider.NEntries],
-				block[DataProvider.Locations], block.get(DataProvider.Metadata))))
-			if blockHash in self._recordedBlock:
-				msg = 'Multiple occurences of block: "%s#%s"!' % (block[DataProvider.Dataset], block[DataProvider.BlockName])
-				msg += ' (This check can be configured with %r)' % self._checkBlockOpt
-				if self._checkBlock == DatasetUniqueMode.warn:
-					self._log.warning(msg)
-				elif self._checkBlock == DatasetUniqueMode.abort:
-					raise DatasetError(msg)
-				elif self._checkBlock == DatasetUniqueMode.skip:
-					return None
-			self._recordedBlock.add(blockHash)
+	def process_block(self, block):
+		if self._limit_files >= 0:  # truncate the number of files
+			self._limit_files_per_ds.setdefault(block[DataProvider.Dataset], self._limit_files)
+			self._reduce_fn_list(block, self._limit_files_per_ds)
+		if self._limit_files_fraction >= 0:  # count the number of files per dataset
+			self._files_per_ds.setdefault(block[DataProvider.Dataset], 0)
+			self._files_per_ds[block[DataProvider.Dataset]] += len(block[DataProvider.FileList])
 		return block
+
+	def _enabled(self):
+		return (self._limit_files >= 0) or (self._limit_files_fraction >= 0)
+
+	def _reduce_fn_list(self, block, fn_list_limit_map):
+		dataset_name = block[DataProvider.Dataset]
+		fn_list_limit = fn_list_limit_map[dataset_name]
+		fi_list_removed = block[DataProvider.FileList][fn_list_limit:]
+		nentry_removed_iter = imap(itemgetter(DataProvider.NEntries), fi_list_removed)
+		block[DataProvider.NEntries] -= sum(nentry_removed_iter)
+		block[DataProvider.FileList] = block[DataProvider.FileList][:fn_list_limit]
+		fn_list_limit_map[dataset_name] -= len(block[DataProvider.FileList])
+
+
+class URLDataProcessor(DataProcessor):
+	alias_list = ['ignore', 'FileDataProcessor']
+
+	def __init__(self, config, datasource_name):
+		DataProcessor.__init__(self, config, datasource_name)
+		config.set('%s ignore urls matcher case sensitive' % datasource_name, 'False')
+		self._url_filter = config.get_filter(self._get_dproc_opt(['ignore files', 'ignore urls']),
+			'', negate=True, default_matcher='BlackWhiteMatcher', default_filter='WeakListFilter',
+			filter_parser=lambda value: self._parse_filter(config, value),
+			filter_str=lambda value: str.join('\n', value.split()))
+
+	def process_block(self, block):
+		if self.enabled():
+			block[DataProvider.FileList] = self._url_filter.filter_list(block[DataProvider.FileList],
+				itemgetter(DataProvider.URL))
+		return block
+
+	def _enabled(self):
+		return self._url_filter.get_selector() is not None
+
+	def _parse_filter(self, config, value):
+		dataset_proc = DataProcessor.create_instance('NullDataProcessor')
+
+		def _get_filter_entries():
+			for pat in value.split():
+				if ':' not in pat.lstrip(':'):
+					yield pat
+				else:
+					block_iter = DataProvider.iter_blocks_from_expr(config, ':%s' % pat.lstrip(':'),
+						dataset_proc=dataset_proc)
+					for block in block_iter:
+						for fi in block[DataProvider.FileList]:
+							yield fi[DataProvider.URL]
+		return str.join('\n', _get_filter_entries())

@@ -1,4 +1,4 @@
-# | Copyright 2007-2016 Karlsruhe Institute of Technology
+# | Copyright 2007-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -12,24 +12,27 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-from grid_control import utils
-from grid_control.backends.wms_grid import GridWMS, jdlEscape
+from grid_control.backends.jdl_writer import JDLWriter
+from grid_control.backends.wms_grid import GridCancelJobs, GridCheckJobs, GridWMS
+from grid_control.utils import resolve_install_path
 from python_compat import imap
 
+
 class EuropeanDataGrid(GridWMS):
-	alias = ['EDG', 'LCG']
+	alias_list = ['EDG', 'LCG']
 
 	def __init__(self, config, name):
-		GridWMS.__init__(self, config, name)
+		GridWMS.__init__(self, config, name,
+			submit_exec=resolve_install_path('edg-job-submit'),
+			output_exec=resolve_install_path('edg-job-get-output'),
+			check_executor=GridCheckJobs(config, 'edg-job-status'),
+			cancel_executor=GridCancelJobs(config, 'edg-job-cancel'),
+			jdl_writer=EDGJDL())
+		self._submit_args_dict.update({'-r': self._ce, '--config-vo': self._config_fn})
 
-		self._submitExec = utils.resolveInstallPath('edg-job-submit')
-		self._statusExec = utils.resolveInstallPath('edg-job-status')
-		self._outputExec = utils.resolveInstallPath('edg-job-get-output')
-		self._cancelExec = utils.resolveInstallPath('edg-job-cancel')
-		self._submitParams.update({'-r': self._ce, '--config-vo': self._configVO })
 
-
-	def storageReq(self, sites):
-		fmt = lambda x: '(target.GlueSEUniqueID == %s)' % jdlEscape(x)
-		if sites:
-			return 'anyMatch(other.storage.CloseSEs, ' + str.join(' || ', imap(fmt, sites)) + ')'
+class EDGJDL(JDLWriter):
+	def _format_reqs_storage(self, locations):
+		if locations:
+			location_iter = imap(lambda x: '(target.GlueSEUniqueID == %s)' % self._escape(x), locations)
+			return 'anyMatch(other.storage.CloseSEs, %s)' % str.join(' || ', location_iter)

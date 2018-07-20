@@ -1,4 +1,4 @@
-# | Copyright 2013-2016 Karlsruhe Institute of Technology
+# | Copyright 2013-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -12,25 +12,80 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-from grid_control import utils
-from grid_control.config import ConfigError
-from grid_control.parameters.pfactory_base import BasicParameterFactory
-from grid_control.parameters.psource_data import DataParameterSource
-from grid_control.parameters.psource_file import CSVParameterSource
-from grid_control.parameters.psource_lookup import createLookupHelper
-from grid_control.parameters.psource_meta import ChainParameterSource, CrossParameterSource, RepeatParameterSource, ZipLongParameterSource
-from grid_control.utils.gc_itertools import lchain
+import logging
+from grid_control.parameters.config_param import is_valid_parameter_char
+from grid_control.parameters.pfactory_base import ParameterError, UserParameterFactory
+from grid_control.parameters.psource_base import ParameterSource
 from hpfwk import APIError
-from python_compat import ifilter, imap, irange, lfilter, next, reduce
+from python_compat import imap, lmap, next
 
-def tokenize(value, tokList):
+
+class SimpleParameterFactory(UserParameterFactory):
+	alias_list = ['simple']
+
+	def __init__(self, config):
+		UserParameterFactory.__init__(self, config)
+		self._operator_map_raw = {  # Mapping of operators - using raw arguments
+			'<>': 'InternalReferenceParameterSource',
+			'{}': 'SubSpaceParameterSource',
+		}
+		self._operator_map_eval = {  # Mapping of operators - using evaluated arguments
+			'*': 'CrossParameterSource',
+			'+': 'ChainParameterSource',
+			',': 'ZipLongParameterSource'
+		}
+
+	def _get_psrc_user(self, pexpr, repository):
+		# Split "A B <data>" into ['A', 'B', '<data>']
+		token_list = list(_str2token_list(pexpr, list('*+,()[]<>{}')))
+		self._log.debug('Parsing parameter string: "%s"', str.join(' ', imap(str, token_list)))
+		# Apply operator precendece and resolve
+		# ['A', 'B', '<data>'] into ('*', ['A', 'B', ('ref', ['data'])])
+		tree = _token_list2token_tree(token_list)
+		self._log.log(logging.DEBUG2, 'Parsed token tree: %r', tree)
+		# Translate token tree into expression
+		# ('*', ['A', 'B', ('ref', ['data'])]) into cross(var('A'), var('B'), data())
+		return self._tree2expr(tree, repository)
+
+	def _tree2expr(self, node, repository):
+		if isinstance(node, int):
+			return node
+		elif isinstance(node, tuple):
+			(operator, args) = node
+			if operator == '[]':
+				psrc_list = []
+				for output_vn in _tree2names(args[0]):
+					psrc_list.append(ParameterSource.create_psrc_safe('InternalAutoParameterSource',
+						self._parameter_config, repository, output_vn, _tree2names(args[1])))
+				return ParameterSource.create_psrc_safe('CrossParameterSource',
+					self._parameter_config, repository, *psrc_list)
+			elif operator in self._operator_map_raw:
+				return ParameterSource.create_psrc_safe(self._operator_map_raw[operator],
+					self._parameter_config, repository, *args)
+			elif operator in self._operator_map_eval:
+				evaluated_args = lmap(lambda node: self._tree2expr(node, repository), args)
+				return ParameterSource.create_psrc_safe(self._operator_map_eval[operator],
+					self._parameter_config, repository, *evaluated_args)
+		else:
+			return ParameterSource.create_psrc_safe('InternalAutoParameterSource',
+				self._parameter_config, repository, node)
+		raise APIError('Unable to parse node %s!' % repr(node))
+
+
+def _eval_operators(resolve_list, token_stack, operator_stack):
+	while operator_stack and (operator_stack[-1] in resolve_list):
+		expr_2 = token_stack.pop()
+		expr_1 = token_stack.pop()
+		token_stack.append((operator_stack.pop(), [expr_1, expr_2]))
+
+
+def _str2token_list(value, token_list):
 	(pos, start) = (0, 0)
 	while pos < len(value):
 		start = pos
 		if (value[pos] == '!') or value[pos].isalpha():
 			pos += 1
-			validChar = lambda c: c.isalnum() or (c in ['_'])
-			while (pos < len(value)) and validChar(value[pos]):
+			while (pos < len(value)) and is_valid_parameter_char(value[pos]):
 				pos += 1
 			yield value[start:pos]
 			continue
@@ -39,44 +94,23 @@ def tokenize(value, tokList):
 				pos += 1
 			yield int(value[start:pos])
 			continue
-		if value[pos] in tokList:
+		if value[pos] in token_list:
 			yield value[pos]
 		pos += 1
 
 
-def tok2inlinetok(tokens, operatorList):
-	token = next(tokens, None)
-	lastTokenExpr = None
-	while token:
-		# insert '*' between two expressions - but not between "<expr> ["
-		if lastTokenExpr and token not in (['[', ']', ')', '>'] + operatorList):
-			yield '*'
-		yield token
-		lastTokenExpr = token not in (['[', '(', '<'] + operatorList)
-		token = next(tokens, None)
+def _token_list2token_tree(value):
+	token_list = list(value)
+	error_template = str.join('', imap(str, token_list))
+	token_iter = iter(token_list)
+	token = next(token_iter, None)
+	token_stack = []
+	operator_stack = []
+	add_operator = False
 
-
-def clearOPStack(opList, opStack, tokStack):
-	while len(opStack) and (opStack[-1][0] in opList):
-		operator = opStack.pop()
-		tmp = []
-		for dummy in irange(len(operator) + 1):
-			tmp.append(tokStack.pop())
-		tmp.reverse()
-		tokStack.append((operator[0], tmp))
-
-
-def tok2tree(value, precedence):
-	value = list(value)
-	errorStr = str.join('', imap(str, value))
-	tokens = iter(value)
-	token = next(tokens, None)
-	tokStack = []
-	opStack = []
-
-	def collectNestedTokens(tokens, left, right, errMsg):
+	def _collect_nested_tokens(token_iter, left, right, error_msg):
 		level = 1
-		token = next(tokens, None)
+		token = next(token_iter, None)
 		while token:
 			if token == left:
 				level += 1
@@ -85,137 +119,50 @@ def tok2tree(value, precedence):
 				if level == 0:
 					break
 			yield token
-			token = next(tokens, None)
+			token = next(token_iter, None)
 		if level != 0:
-			raise ConfigError(errMsg)
+			raise ParameterError(error_msg)
 
 	while token:
-		if token == '(':
-			tmp = list(collectNestedTokens(tokens, '(', ')', "Parenthesis error: " + errorStr))
-			tokStack.append(tok2tree(tmp, precedence))
-		elif token == '<':
-			tmp = list(collectNestedTokens(tokens, '<', '>', "Parenthesis error: " + errorStr))
-			tokStack.append(('ref', tmp))
-		elif token == '[':
-			tmp = list(collectNestedTokens(tokens, '[', ']', "Parenthesis error: " + errorStr))
-			tokStack.append(('lookup', [tokStack.pop(), tok2tree(tmp, precedence)]))
-		elif token in precedence:
-			clearOPStack(precedence[token], opStack, tokStack)
-			if opStack and opStack[-1].startswith(token):
-				opStack[-1] = opStack[-1] + token
-			else:
-				opStack.append(token)
+		if add_operator and (token not in ['*', '+', ',', '[']):
+			operator_stack.append('*')
+		if token == '(':  # replace tokens between < > with evaluated tree
+			tmp = list(_collect_nested_tokens(token_iter, '(', ')', 'Parenthesis error: ' + error_template))
+			token_stack.append(_token_list2token_tree(tmp))
+		elif token == '<':  # forward raw tokens between < >
+			tmp = list(_collect_nested_tokens(token_iter, '<', '>', 'Parenthesis error: ' + error_template))
+			token_stack.append(('<>', tmp))
+		elif token == '{':  # forward raw tokens between { }
+			tmp = list(_collect_nested_tokens(token_iter, '{', '}', 'Parenthesis error: ' + error_template))
+			token_stack.append(('{}', tmp))
+		elif token == '[':  # pack token_tree in front of [] and token within [] together
+			tmp = list(_collect_nested_tokens(token_iter, '[', ']', 'Parenthesis error: ' + error_template))
+			token_stack.append(('[]', [token_stack.pop(), _token_list2token_tree(tmp)]))
+		elif token == ',':
+			_eval_operators('*+', token_stack, operator_stack)
+			operator_stack.append(token)
+		elif token == '+':
+			_eval_operators('*', token_stack, operator_stack)
+			operator_stack.append(token)
+		elif token == '*':
+			operator_stack.append(token)
 		else:
-			tokStack.append(token)
-		token = next(tokens, None)
+			token_stack.append(token)
+		add_operator = (token not in ['*', '+', ','])
+		token = next(token_iter, None)
+	_eval_operators('*+,', token_stack, operator_stack)
 
-	clearOPStack(precedence.keys(), opStack, tokStack)
-	assert(len(tokStack) == 1)
-	return tokStack[0]
+	if len(token_stack) != 1:
+		raise ParameterError('Invalid stack state detected: %r %r' % (token_stack, operator_stack))
+	return token_stack[0]
 
 
-def tree2names(node): # return list of referenced variable names in tree
+def _tree2names(node):  # return list of referenced variable names in tree
 	if isinstance(node, tuple):
 		result = []
 		for op_args in node[1:]:
 			for arg in op_args:
-				result.extend(tree2names(arg))
+				result.extend(_tree2names(arg))
 		return result
 	else:
 		return [node]
-
-
-class SimpleParameterFactory(BasicParameterFactory):
-	def __init__(self, config, name):
-		BasicParameterFactory.__init__(self, config, name)
-		self._pExpr = self._paramConfig.get('parameters', None, '')
-		self.elevatedSwitch = [] # Switch statements are elevated to global scope
-		self.precedence = {'*': [], '+': ['*'], ',': ['*', '+']}
-
-
-	def combineSources(self, PSourceClass, args):
-		repeat = reduce(lambda a, b: a * b, ifilter(lambda expr: isinstance(expr, int), args), 1)
-		args = lfilter(lambda expr: not isinstance(expr, int), args)
-		if len(args) > 1:
-			result = PSourceClass(*args)
-		elif len(args) > 0:
-			result = args[0]
-		else:
-			return utils.QM(repeat > 1, [repeat], [])
-		if repeat > 1:
-			return [RepeatParameterSource(result, repeat)]
-		return [result]
-
-
-	def _createVarSource(self, var_list, lookup_list): # create variable source
-		psource_list = []
-		for (doElevate, PSourceClass, args) in createLookupHelper(self._paramConfig, var_list, lookup_list):
-			if doElevate: # switch needs elevation beyond local scope
-				self.elevatedSwitch.append((PSourceClass, args))
-			else:
-				psource_list.append(PSourceClass(*args))
-		# Optimize away unnecessary cross operations
-		if len(lfilter(lambda p: p.getMaxParameters() is not None, psource_list)) > 1:
-			return [CrossParameterSource(*psource_list)]
-		return psource_list # simply forward list of psources
-
-
-	def tree2expr(self, node):
-		if isinstance(node, tuple):
-			(operator, args) = node
-			if operator == 'lookup':
-				assert(len(args) == 2)
-				return self._createVarSource(tree2names(args[0]), tree2names(args[1]))
-			elif operator == 'ref':
-				assert(len(args) == 1)
-				refTypeDefault = 'dataset'
-				if args[0] not in DataParameterSource.datasetsAvailable:
-					refTypeDefault = 'csv'
-				refType = self._paramConfig.get(args[0], 'type', refTypeDefault)
-				if refType == 'dataset':
-					return [DataParameterSource.create(self._paramConfig, args[0])]
-				elif refType == 'csv':
-					return [CSVParameterSource.create(self._paramConfig, args[0])]
-				raise APIError('Unknown reference type: "%s"' % refType)
-			else:
-				args_complete = lchain(imap(self.tree2expr, args))
-				if operator == '*':
-					return self.combineSources(CrossParameterSource, args_complete)
-				elif operator == '+':
-					return self.combineSources(ChainParameterSource, args_complete)
-				elif operator == ',':
-					return self.combineSources(ZipLongParameterSource, args_complete)
-				raise APIError('Unknown token: "%s"' % operator)
-		elif isinstance(node, int):
-			return [node]
-		else:
-			return self._createVarSource([node], None)
-
-
-	def _getUserSource(self, pExpr, parent):
-		tokens = tokenize(pExpr, lchain([self.precedence.keys(), list('()[]<>')]))
-		tokens = list(tok2inlinetok(tokens, list(self.precedence.keys())))
-		utils.vprint('Parsing parameter string: "%s"' % str.join(' ', imap(str, tokens)), 0)
-		tree = tok2tree(tokens, self.precedence)
-
-		source_list = self.tree2expr(tree)
-		if DataParameterSource.datasetsAvailable and not DataParameterSource.datasetsUsed:
-			source_list.insert(0, DataParameterSource.create())
-		if parent:
-			source_list.append(parent)
-		if len(lfilter(lambda p: p.getMaxParameters() is not None, source_list)) > 1:
-			source = self.combineSources(CrossParameterSource, source_list)
-		else:
-			source = self.combineSources(ZipLongParameterSource, source_list) # zip more efficient
-		assert(len(source) == 1)
-		source = source[0]
-		for (PSourceClass, args) in self.elevatedSwitch:
-			source = PSourceClass(source, *args)
-		utils.vprint('Parsing output: %r' % source, 0)
-		return source
-
-
-	def _getRawSource(self, parent):
-		if self._pExpr:
-			parent = self._getUserSource(self._pExpr, parent)
-		return BasicParameterFactory._getRawSource(self, parent)

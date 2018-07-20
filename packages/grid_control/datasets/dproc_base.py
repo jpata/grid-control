@@ -1,4 +1,4 @@
-# | Copyright 2015-2016 Karlsruhe Institute of Technology
+# | Copyright 2015-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -13,43 +13,99 @@
 # | limitations under the License.
 
 import logging
+from grid_control.config import join_config_locations
 from grid_control.gc_plugin import ConfigurablePlugin
-from hpfwk import AbstractError
+from grid_control.utils import prune_processors
+from hpfwk import AbstractError, NestedException
+from python_compat import imap
+
+
+class DataProcessorError(NestedException):
+	pass
+
 
 class DataProcessor(ConfigurablePlugin):
-	def __init__(self, config):
+	def __init__(self, config, datasource_name):
 		ConfigurablePlugin.__init__(self, config)
-		self._log = logging.getLogger('dataproc')
+		self._datasource_name = datasource_name
+		self._log = logging.getLogger('%s.provider.processor' % datasource_name)
+		self._log_debug = None
+		if self._log.isEnabledFor(logging.DEBUG):
+			self._log_debug = self._log
+		self._disabled = False
 
-	def process(self, blockIter):
-		for block in blockIter:
-			if block is not None:
-				yield self.processBlock(block)
+	def __repr__(self):
+		return self._repr_base()
 
-	def processBlock(self, block):
+	def disable_stream_singletons(self):
+		pass
+
+	def enabled(self):
+		return self._enabled() and not self._disabled
+
+	def must_complete_for_partition(self):
+		return False
+
+	def process(self, block_iter):
+		for block in block_iter:
+			try:
+				if self._log_debug:
+					self._log_debug.debug('%s is processing block %s...' % (self, repr(block)))
+				result = self.process_block(block)
+				if result is not None:
+					yield result
+				if self._log_debug:
+					self._log_debug.debug('%s process result: %s' % (self, repr(result)))
+			except Exception:
+				error_msg = 'Error while processing dataset block in datasource %s'
+				raise DataProcessorError(error_msg % repr(self._datasource_name))
+		self._finished()
+
+	def process_block(self, block):
 		raise AbstractError
+
+	def _enabled(self):
+		return True
+
+	def _finished(self):
+		pass
+
+	def _get_dproc_opt(self, *args):
+		return join_config_locations(self._datasource_name, *args)
 
 
 class MultiDataProcessor(DataProcessor):
-	def __init__(self, config, processorList):
-		DataProcessor.__init__(self, config)
-		self._processorList = processorList
+	alias_list = ['multi']
 
-	def process(self, blockIter):
-		for processor in self._processorList:
-			blockIter = processor.process(blockIter)
-		return blockIter
+	def __init__(self, config, processor_list, datasource_name):
+		DataProcessor.__init__(self, config, datasource_name)
+		self._do_prune = config.get_bool(self._get_dproc_opt('processor prune'), True)
+		self._processor_list = prune_processors(self._do_prune, processor_list,
+			self._log, 'Removed %d inactive dataset processors!')
 
-	def processBlock(self, block):
-		for processor in self._processorList:
-			block = processor.processBlock(block)
-			if not block:
-				break
-		return block
+	def __repr__(self):
+		return str.join(' => ', imap(repr, self._processor_list))
+
+	def disable_stream_singletons(self):
+		for processor in self._processor_list:
+			processor.disable_stream_singletons()
+		self._processor_list = prune_processors(self._do_prune, self._processor_list,
+			self._log, 'Removed %d singleton dataset processors!')
+
+	def must_complete_for_partition(self):
+		return True in imap(lambda dp: dp.must_complete_for_partition(), self._processor_list)
+
+	def process(self, block_iter):
+		for processor in self._processor_list:
+			block_iter = processor.process(block_iter)
+		return block_iter
 
 
 class NullDataProcessor(DataProcessor):
-	alias = ['null']
+	alias_list = ['null']
 
-	def processBlock(self, block):
+	def __init__(self, config=None, datasource_name=None):
+		DataProcessor.__init__(self, config, datasource_name)
+
+	def process_block(self, block):
 		return block

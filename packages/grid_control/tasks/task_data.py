@@ -1,4 +1,4 @@
-# | Copyright 2009-2016 Karlsruhe Institute of Technology
+# | Copyright 2009-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -13,93 +13,42 @@
 # | limitations under the License.
 
 import signal
-from grid_control import utils
-from grid_control.datasets import DataProvider, DataSplitter, PartitionProcessor
-from grid_control.gc_exceptions import UserError
+from grid_control.config import TriggerResync
 from grid_control.parameters import ParameterSource
 from grid_control.tasks.task_base import TaskModule
-from grid_control.utils.parsing import strTime
-from python_compat import lfilter
+from grid_control.utils.algos import dict_union
+
 
 class DataTask(TaskModule):
-	def setupJobParameters(self, config, pm):
-		config = config.changeView(viewClass = 'TaggedConfigView', addSections = ['dataset'])
-		self.dataSplitter = None
-		self.dataRefresh = -1
-		def userRefresh(config, old_obj, cur_obj, cur_entry, obj2str):
-			if (old_obj == '') and (cur_obj != ''):
-				raise UserError('It is currently not possible to attach a dataset to a non-dataset task!')
-			self._log.info('Dataset setup was changed - forcing resync...')
-			config.setState(True, 'resync', detail = 'dataset')
-			config.setState(True, 'init', detail = 'config') # This will trigger a write of the new options
-			return cur_obj
-		dataProvider = config.getCompositePlugin('dataset', '', ':MultiDatasetProvider:',
-			cls = DataProvider, requirePlugin = False, onChange = userRefresh)
-		self._forceRefresh = config.getState('resync', detail = 'dataset')
-		config.setState(False, 'resync', detail = 'dataset')
-		if not dataProvider:
-			return
+	def get_var_alias_map(self):
+		if self._has_dataset:  # create alias NICK for DATASETNICK
+			return dict_union(TaskModule.get_var_alias_map(self), {'NICK': 'DATASETNICK'})
+		return TaskModule.get_var_alias_map(self)
 
-		tmp_config = config.changeView(viewClass = 'TaggedConfigView', setClasses = None, setNames = None, setTags = [], addSections = ['storage'])
-		tmp_config.set('se output pattern', '@NICK@_job_@GC_JOB_ID@_@X@')
-		tmp_config = config.changeView(viewClass = 'TaggedConfigView', setClasses = None, setNames = None, setTags = [], addSections = ['parameters'])
-		tmp_config.set('default lookup', 'DATASETNICK')
+	def _create_datasource(self, config, datasource_name, psrc_repository, psrc_list):
+		data_ps = ParameterSource.create_instance('DataParameterSource',
+			config, datasource_name, psrc_repository)
+		if not isinstance(data_ps, ParameterSource.get_class('NullParameterSource')):
+			config.set('se output pattern', '@NICK@_job_@GC_JOB_ID@_@X@', section='storage')
+			config.set('default lookup', 'DATASETNICK', section='parameters')
+			psrc_list.append(data_ps)
+			return data_ps
 
-		splitterName = config.get('dataset splitter', 'FileBoundarySplitter')
-		splitterClass = dataProvider.checkSplitter(DataSplitter.getClass(splitterName))
-		self.dataSplitter = splitterClass(config)
+	def _setup_repository(self, config, psrc_repository):
+		TaskModule._setup_repository(self, config, psrc_repository)
 
-		# Create and register dataset parameter source
-		partProcessor = config.getCompositePlugin('partition processor',
-			'TFCPartitionProcessor LocationPartitionProcessor BasicPartitionProcessor',
-			'MultiPartitionProcessor', cls = PartitionProcessor)
-		DataParameterSource = ParameterSource.getClass('DataParameterSource')
-		self._dataPS = DataParameterSource(config.getWorkPath(), 'data',
-			dataProvider, self.dataSplitter, partProcessor)
-		DataParameterSource.datasetsAvailable['data'] = self._dataPS
+		psrc_list = []
+		for datasource_name in config.get_list('datasource names', ['dataset'],
+				on_change=TriggerResync(['datasets', 'parameters'])):
+			data_config = config.change_view(view_class='TaggedConfigView', add_sections=[datasource_name])
+			self._create_datasource(data_config, datasource_name, psrc_repository, psrc_list)
+		self._has_dataset = (psrc_list != [])
 
-		# Select dataset refresh rate
-		self.dataRefresh = config.getTime('dataset refresh', -1, onChange = None)
-		if self.dataRefresh > 0:
-			self._dataPS.resyncSetup(interval = max(self.dataRefresh, dataProvider.queryLimit()))
-			utils.vprint('Dataset source will be queried every %s' % strTime(self.dataRefresh), -1)
-		else:
-			self._dataPS.resyncSetup(interval = 0)
-		if self._forceRefresh:
-			self._dataPS.resyncSetup(force = True)
-		def externalRefresh(sig, frame):
-			self._dataPS.resyncSetup(force = True)
-		signal.signal(signal.SIGUSR2, externalRefresh)
+		# Register signal handler for manual dataset refresh
+		def _external_refresh(sig, frame):
+			for psrc in psrc_list:
+				self._log.info('External signal triggered resync of datasource %r', psrc.get_datasource_name())
+				psrc.setup_resync(force=True)
+		signal.signal(signal.SIGUSR2, _external_refresh)
 
-		if self.dataSplitter.getMaxJobs() == 0:
-			raise UserError('There are no events to process')
-
-
-	def getVarMapping(self):
-		if self.dataSplitter:
-			return utils.mergeDicts([TaskModule.getVarMapping(self), {'NICK': 'DATASETNICK'}])
-		return TaskModule.getVarMapping(self)
-
-
-	# Called on job submission
-	def getSubmitInfo(self, jobNum):
-		jobInfo = self.source.getJobInfo(jobNum)
-		submitInfo = {'nevtJob': jobInfo.get('MAX_EVENTS', 0),
-			'datasetFull': jobInfo.get('DATASETPATH', 'none')}
-		return utils.mergeDicts([TaskModule.getSubmitInfo(self, jobNum), submitInfo])
-
-
-	def canFinish(self):
-		return self.dataRefresh <= 0
-
-
-	def report(self, jobNum):
-		info = self.source.getJobInfo(jobNum)
-		keys = lfilter(lambda k: not k.untracked, self.source.getJobKeys())
-		result = utils.filterDict(info, kF = lambda k: k in keys)
-		if self.dataSplitter:
-			result.pop('DATASETSPLIT')
-			result['Dataset'] = info.get('DATASETNICK', info.get('DATASETPATH', None))
-		elif not keys:
-			result[' '] = 'All jobs'
-		return result
+		config.set_state(False, 'resync', detail='datasets')

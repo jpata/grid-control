@@ -26,47 +26,61 @@
 
      * grid_control.datasets.splitter_basic FileLevelSplitter
 
-      * grid_control.datasets.splitter_meta MetadataSplitter
+      * grid_control.datasets.splitter_meta FileClassSplitter
 
        * grid_control_cms.splitter_lumi RunSplitter runs
 
     * grid_control.datasets.scanner_base InfoScanner
 
-     * grid_control_cms.scanner_cmssw FilterEDMFiles
+     * grid_control_cms.scanner_cmssw FilterEDMFiles edm
 
-     * grid_control_cms.scanner_cmssw LFNFromPath
+     * grid_control_cms.scanner_cmssw LFNFromPath lfn
 
-     * grid_control_cms.scanner_cmssw MetadataFromCMSSW
+     * grid_control_cms.scanner_cmssw MetadataFromCMSSW cmssw_metadata
 
-     * grid_control_cms.scanner_cmssw ObjectsFromCMSSW
+     * grid_control_cms.scanner_cmssw ObjectsFromCMSSW cmssw_obj
 
-     * grid_control_cms.scanner_cmssw SEListFromPath
+     * grid_control_cms.scanner_cmssw SEListFromPath storage
 
     * grid_control.gc_plugin NamedPlugin
 
-     * grid_control.monitoring EventHandler
+     * grid_control.event_base LocalEventHandler NullLocalEventHandler null
 
-      * grid_control.monitoring Monitoring
+      * grid_control_cms.event_dashboard DashboardLocal dashboard
 
-       * grid_control_cms.event_dashboard DashBoard
+     * grid_control.event_base RemoteEventHandler NullRemoteEventHandler null
+
+      * grid_control_cms.event_dashboard DashboardRemote dashboard
 
      * grid_control.tasks.task_base TaskModule
 
       * grid_control.tasks.task_data DataTask
 
-       * grid_control_cms.cmssw SCRAMTask
+       * grid_control_cms.task_cmssw SCRAMTask
 
-        * grid_control_cms.cmssw CMSSW
+        * grid_control_cms.task_cmssw CMSSW
 
-         * grid_control_cms.cmssw_advanced CMSSW_Advanced
+         * grid_control_cms.task_cmssw_advanced CMSSWAdvanced CMSSW_Advanced
 
     * grid_control.datasets.pproc_base PartitionProcessor
 
-     * grid_control.datasets.pproc_base BasicPartitionProcessor basic
+     * grid_control.datasets.pproc_basic BasicPartitionProcessor basic
 
-      * grid_control_cms.cmssw CMSSWPartitionProcessor cmssw
+      * grid_control_cms.pproc_cms CMSSWPartitionProcessor cmsswpart
 
-     * grid_control_cms.cmssw LFNPartitionProcessor lfnprefix
+     * grid_control_cms.pproc_cms LFNPartitionProcessor lfnprefix
 
-     * grid_control_cms.lumi_proc LumiPartitionProcessor
+     * grid_control_cms.lumi_proc LumiPartitionProcessor lumi
+
+   * grid_control.datasets.provider_scan GCProviderSetup GCProviderSetup_TaskModule
+
+    * grid_control_cms.scanner_cmssw GCProviderSetupCMSSW GCProviderSetup_CMSSW
+
+   * grid_control.output_processor OutputProcessor
+
+    * grid_control.output_processor JobInfoProcessor jobinfo
+
+     * grid_control.output_processor DebugJobInfoProcessor debug
+
+      * grid_control_cms.task_cmssw CMSSWDebugJobInfoProcessor cmssw_debug
 

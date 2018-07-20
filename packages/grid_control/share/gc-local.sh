@@ -1,5 +1,5 @@
 #!/bin/bash
-# | Copyright 2009-2015 Karlsruhe Institute of Technology
+# | Copyright 2009-2016 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -47,6 +47,6 @@ if [ -n "$GC_DELAY_OUTPUT" ]; then
 	mv "$GC_LOCALSCRATCH/gc.stdout.tmp" "$GC_DELAY_OUTPUT"
 	mv "$GC_LOCALSCRATCH/gc.stderr.tmp" "$GC_DELAY_ERROR"
 else
-	./gc-run.sh ${GC_JOB_ID}
+	./gc-run.sh "${GC_JOB_ID}"
 fi
 [ -n "$GC_LOCALSCRATCH" ] && rmdir "$GC_LOCALSCRATCH"

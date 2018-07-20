@@ -1,4 +1,4 @@
-# | Copyright 2007-2016 Karlsruhe Institute of Technology
+# | Copyright 2007-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -12,59 +12,57 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-# Generic base class for authentication proxies GCSCF:
-
 from grid_control.backends.access import AccessTokenError, TimedAccessToken
-from grid_control.utils import DictFormat, resolveInstallPath
-from grid_control.utils.parsing import parseTime
+from grid_control.utils import DictFormat, resolve_install_path
 from grid_control.utils.process_base import LocalProcess
+from hpfwk import AbstractError
 from python_compat import identity
 
-class VomsAccessToken(TimedAccessToken):
-	alias = ['voms', 'VomsProxy']
 
-	def __init__(self, config, name):
+class GridAccessToken(TimedAccessToken):
+	def __init__(self, config, name, proxy_exec):
 		TimedAccessToken.__init__(self, config, name)
-		self._infoExec = resolveInstallPath('voms-proxy-info')
-		self._proxyPath = config.get('proxy path', '')
-		self._ignoreWarning = config.getBool('ignore warnings', False, onChange = None)
+		self._proxy_info_exec = resolve_install_path(proxy_exec)
+		self._proxy_fn = config.get('proxy path', '')
+		self._ignore_warning = config.get_bool('ignore warnings', False, on_change=None)
 		self._cache = None
 
-	def getUsername(self):
-		return self._getProxyInfo('identity').split('CN=')[1].strip()
+	def get_fq_user_name(self):
+		return self._get_proxy_info('identity')
 
-	def getFQUsername(self):
-		return self._getProxyInfo('identity')
+	def get_group(self):
+		return self._get_proxy_info('vo')
 
-	def getGroup(self):
-		return self._getProxyInfo('vo')
+	def get_proxy_fn(self):
+		return self._proxy_fn
 
-	def getAuthFiles(self):
-		return [self._getProxyInfo('path')]
+	def get_user_name(self):
+		return self._get_proxy_info('identity').split('CN=')[1].strip()
 
-	def _getTimeleft(self, cached):
-		return self._getProxyInfo('timeleft', parseTime, cached)
+	def _get_proxy_info(self, key, parse=identity, cached=True):
+		info = self._parse_proxy(cached)
+		try:
+			return parse(info[key])
+		except Exception:
+			raise AccessTokenError("Can't access %r in proxy information:\n%s" % (key, info))
 
-	def _parseProxy(self, cached = True):
+	def _get_proxy_info_arguments(self):
+		raise AbstractError
+
+	def _parse_proxy(self, cached=True):
 		# Return cached results if requested
 		if cached and self._cache:
 			return self._cache
 		# Call voms-proxy-info and parse results
-		args = ['--all']
-		if self._proxyPath:
-			args.extend(['--file', self._proxyPath])
-		proc = LocalProcess(self._infoExec, *args)
-		(retCode, stdout, stderr) = proc.finish(timeout = 10)
-		if (retCode != 0) and not self._ignoreWarning:
-			msg = ('voms-proxy-info output:\n%s\n%s\n' % (stdout, stderr)).replace('\n\n', '\n')
+		proc = LocalProcess(self._proxy_info_exec, *self._get_proxy_info_arguments())
+		(exit_code, stdout, stderr) = proc.finish(timeout=10)
+		if (exit_code != 0) and not self._ignore_warning:
+			msg = ('%s output:\n%s\n%s\n' % (self._proxy_info_exec, stdout, stderr)).replace('\n\n', '\n')
 			msg += 'If job submission is still possible, you can set [access] ignore warnings = True\n'
-			raise AccessTokenError(msg + 'voms-proxy-info failed with return code %d' % retCode)
+			msg += '%s failed with return code %d' % (self._proxy_info_exec, exit_code)
+			raise AccessTokenError(msg)
 		self._cache = DictFormat(':').parse(stdout)
+		if not self._cache:
+			msg = 'Unable to parse access token information:\n\t%s\n\t%s\n'
+			raise AccessTokenError(msg % (stdout.strip(), stderr.strip()))
 		return self._cache
-
-	def _getProxyInfo(self, key, parse = identity, cached = True):
-		info = self._parseProxy(cached)
-		try:
-			return parse(info[key])
-		except Exception:
-			raise AccessTokenError("Can't access %s in proxy information:\n%s" % (key, info))

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# | Copyright 2016 Karlsruhe Institute of Technology
+# | Copyright 2016-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -13,45 +13,33 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-from gcSupport import Options, Plugin, scriptOptions, utils
-from python_compat import lmap, sorted
+import sys
+from gc_scripts import Plugin, ScriptOptions, display_plugin_list, get_plugin_list
+from python_compat import lidfilter, lmap
 
-parser = Options(usage = '%s <BasePlugin>')
-options = scriptOptions(parser)
-if not options.args:
-	utils.exitWithUsage(parser.usage())
 
-def getDisplayList(aliasDict):
-	tableList = []
-	for name in aliasDict:
-		# sorted by length of name and depth
-		by_len_depth = sorted(aliasDict[name], key = lambda d_a: (-len(d_a[1]), d_a[0]))
-		# sorted by depth and name
-		by_depth_name = sorted(aliasDict[name], key = lambda d_a: (d_a[0], d_a[1]))
-		new_name = by_len_depth.pop()[1]
-		aliasList = lmap(lambda d_a: d_a[1], by_depth_name)
-		aliasList.remove(new_name)
-		entry = {'Name': new_name, 'Alias': str.join(', ', aliasList)}
-		if ('Multi' not in name) and ('Base' not in name):
-			tableList.append(entry)
-	return tableList
+def _main():
+	parser = ScriptOptions(usage='%s [OPTIONS] <BasePlugin>')
+	parser.add_bool(None, 'a', 'show_all', default=False, help='Show plugins without user alias')
+	parser.add_bool(None, 'p', 'parents', default=False, help='Show plugin parents')
+	parser.add_bool(None, 'c', 'children', default=False, help='Show plugin children')
+	options = parser.script_parse()
+	if len(options.args) != 1:
+		parser.exit_with_usage()
+	pname = options.args[0]
+	if options.opts.parents:
+		def _get_cls_info(cls):
+			return {'Name': cls.__name__, 'Alias': str.join(', ', lidfilter(cls.get_class_name_list()[1:]))}
+		display_plugin_list(lmap(_get_cls_info, Plugin.get_class(pname).iter_class_bases()),
+			show_all=True, sort_key=None, title='Parents of plugin %r' % pname)
+	else:
+		sort_key = 'Name'
+		if options.opts.children:
+			sort_key = 'Inherit'
+		display_plugin_list(get_plugin_list(pname, inherit_prefix=options.opts.children),
+			show_all=options.opts.children or options.opts.show_all,
+			sort_key=sort_key, title='Available plugins of type %r' % pname)
 
-def displayList(clsList):
-	header = [('Name', 'Name')]
-	fmtString = 'l'
-	for entry in clsList:
-		if entry['Alias']:
-			header.append(('Alias', 'Alias'))
-			fmtString = 'rl'
-			break
-	utils.printTabular(header, sorted(clsList, key = lambda x: x['Name'].lower()), fmtString = fmtString)
 
 if __name__ == '__main__':
-	BasePlugin = Plugin.getClass(options.args[0])
-	aliasDict = {}
-	for entry in BasePlugin.getClassList():
-		depth = entry.pop('depth', 0)
-		(alias, name) = entry.popitem()
-		aliasDict.setdefault(name, []).append((depth, alias))
-	aliasDict.pop(options.args[0])
-	displayList(getDisplayList(aliasDict))
+	sys.exit(_main())

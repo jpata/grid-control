@@ -1,4 +1,4 @@
-# | Copyright 2007-2016 Karlsruhe Institute of Technology
+# | Copyright 2007-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -12,15 +12,25 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-def initGC():
-	import os, sys
-	basePath = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-	sys.path.insert(1, basePath) # packages bundled with grid-control have priority
-	os.environ['GC_PACKAGES_PATH'] = basePath # Store grid-control base path in enviroment variable
-	from hpfwk import init_hpf_plugins
-	from grid_control.logging_setup import logging_defaults
-	init_hpf_plugins(basePath)
-	logging_defaults()
-initGC()
+__version__ = '1.9.82'
 
-__version__ = '$Revision: 1764$'[11:-1]
+
+def _init_grid_control():
+	if not _init_grid_control.flag:
+		_init_grid_control.flag = True
+		import os, sys
+		packages_base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+		sys.path.insert(1, packages_base_path)  # packages bundled with grid-control have priority
+		os.environ['GC_PACKAGES_PATH'] = packages_base_path  # Store grid-control base path
+
+		from hpfwk import init_hpf_plugins
+		package_name_list = os.listdir(packages_base_path)
+		package_name_list.sort()
+		for package_name in package_name_list:
+			init_hpf_plugins(os.path.join(packages_base_path, package_name))
+
+		from grid_control.logging_setup import logging_defaults
+		logging_defaults()
+_init_grid_control.flag = False  # <global-state>
+
+_init_grid_control()

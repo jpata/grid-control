@@ -1,4 +1,4 @@
-# | Copyright 2012-2016 Karlsruhe Institute of Technology
+# | Copyright 2012-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -12,29 +12,21 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-import sys
-from grid_control.report import Report
-from grid_control.utils.parsing import strTime
+from grid_control.report import ConsoleReport
+from grid_control.utils.parsing import str_time_long
+from python_compat import ifilter, imap
 
-class TimeReport(Report):
-	alias = ['time']
 
-	def __init__(self, jobDB, task, jobs = None, configString = ''):
-		Report.__init__(self, jobDB, task, jobs, configString)
-		self._dollar_per_hour = 0.013
-		if configString:
-			self._dollar_per_hour = float(configString)
+class TimeReport(ConsoleReport):
+	alias_list = ['time']
 
-	def getHeight(self):
-		return 1
+	def __init__(self, config, name, job_db, task=None):
+		ConsoleReport.__init__(self, config, name, job_db, task)
+		self._dollar_per_hour = config.get_float('dollar per hour', 0.013, on_change=None)
 
-	def display(self):
-		cpuTime = 0
-		for jobNum in self._jobs:
-			jobObj = self._jobDB.get(jobNum)
-			if jobObj:
-				cpuTime += jobObj.get('runtime', 0)
-		msg = 'Consumed wall time: %-20s' % strTime(cpuTime)
-		msg += 'Estimated cost: $%.2f\n' % ((cpuTime / 60. / 60.) * self._dollar_per_hour)
-		sys.stdout.write(msg)
-		sys.stdout.flush()
+	def show_report(self, job_db, jobnum_list):
+		jr_iter = imap(lambda jobnum: job_db.get_job_transient(jobnum).get('runtime', 0), jobnum_list)
+		cpu_time = sum(ifilter(lambda rt: rt > 0, jr_iter))
+		msg1 = 'Consumed wall time: %-20s' % str_time_long(cpu_time)
+		msg2 = 'Estimated cost: $%.2f' % ((cpu_time / 60. / 60.) * self._dollar_per_hour)
+		self._show_line(msg1 + msg2.rjust(65 - len(msg1)))

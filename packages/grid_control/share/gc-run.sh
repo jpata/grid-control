@@ -1,5 +1,5 @@
 #!/bin/bash
-# | Copyright 2008-2016 Karlsruhe Institute of Technology
+# | Copyright 2008-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -15,14 +15,14 @@
 
 # grid-control: https://ekptrac.physik.uni-karlsruhe.de/trac/grid-control
 
+export GC_JOB_ID="$1"
 export GC_DOCLEANUP="true"
 source gc-run.lib || exit 101
 
 set +f
 gc_trap
-export GC_JOB_ID="$1"
 export MY_JOBID="$GC_JOB_ID" # legacy script support
-export GC_LANDINGZONE="`pwd`"
+export GC_LANDINGZONE="$(pwd)"
 export GC_MARKER="$GC_LANDINGZONE/RUNNING.$$"
 export GC_FAIL_MARKER="$GC_LANDINGZONE/GCFAIL"
 export GC_SCRATCH="`getscratch`"
@@ -56,11 +56,11 @@ echo "==========================="
 echo
 timestamp "DEPLOYMENT" "START"
 echo "==========================="
-checkfile "$GC_LANDINGZONE/gc-sandbox.tar.gz"
+gc_check_file_exists "$GC_LANDINGZONE/gc-sandbox.tar.gz"
 
 echo "Unpacking basic job configuration"
 tar xvfz "$GC_LANDINGZONE/gc-sandbox.tar.gz" -C "$GC_SCRATCH" _config.sh || fail 105
-checkfile "$GC_SCRATCH/_config.sh"
+gc_check_file_exists "$GC_SCRATCH/_config.sh"
 source "$GC_SCRATCH/_config.sh"
 
 # Monitor space usage
@@ -78,14 +78,14 @@ fi
 
 echo "Unpacking environment"
 tar xvfz "$GC_LANDINGZONE/gc-sandbox.tar.gz" -C "$GC_SCRATCH" || fail 105
-checkfile "$GC_LANDINGZONE/job_${GC_JOB_ID}.var"
+gc_check_file_exists "$GC_LANDINGZONE/job_${GC_JOB_ID}.var"
 cat "$GC_LANDINGZONE/job_${GC_JOB_ID}.var" >> "$GC_SCRATCH/_config.sh"
 source "$GC_SCRATCH/_config.sh"
 
 echo "Prepare variable substitution"
-checkfile "$GC_SCRATCH/_varmap.dat"
+gc_check_file_exists "$GC_SCRATCH/_varmap.dat"
 echo "@DATE@: Variable substitution in task @GC_TASK_ID@: @X@" | var_replacer "SUCCESSFUL"
-checkfile "$GC_SCRATCH/_replace.awk"
+gc_check_file_exists "$GC_SCRATCH/_replace.awk"
 cat "$GC_SCRATCH/_replace.awk" | display_short
 
 # Job timeout (for debugging)
@@ -104,7 +104,7 @@ if [ -n "$GC_DEPFILES" ]; then
 	echo "==========================="
 	echo
 	for DEPFILE in $GC_DEPFILES; do
-		checkfile "$GC_SCRATCH/env.$DEPFILE.sh"
+		gc_check_file_exists "$GC_SCRATCH/env.$DEPFILE.sh"
 		source "$GC_SCRATCH/env.$DEPFILE.sh"
 	done
 	echo
@@ -117,7 +117,7 @@ if [ -n "$GC_MONITORING" ]; then
 	my_move "$GC_SCRATCH" "$GC_LANDINGZONE" "$GC_MONITORING"
 	echo
 	for MON_APP in $GC_MONITORING; do
-		checkfile "$GC_LANDINGZONE/$MON_APP"
+		gc_check_file_exists "$GC_LANDINGZONE/$MON_APP"
 		source "$GC_LANDINGZONE/$MON_APP" "start"
 	done
 	echo
@@ -153,6 +153,17 @@ if [ -n "$SE_INPUT_FILES" ]; then
 	echo
 fi
 
+# If SRM path to dataset files given, copy them to working directory
+if [ -n "$DATASET_SRM_FILES" ]; then
+	echo "==========================="
+	echo
+	echo "Copy dataset files via SRM"
+	for DATASET_SRM_FILE in $DATASET_SRM_FILES; do
+		url_copy "$(dirname $DATASET_SRM_FILE)" "file:///$GC_SCRATCH" "$(basename $DATASET_SRM_FILE)"
+	done
+	echo
+fi
+
 echo "==========================="
 timestamp "SE_IN" "DONE"
 echo
@@ -167,7 +178,7 @@ done
 
 SAVED_SE_INPUT_PATH="$SE_INPUT_PATH"
 SAVED_SE_OUTPUT_PATH="$SE_OUTPUT_PATH"
-checkfile "$GC_SCRATCH/_config.sh"
+gc_check_file_exists "$GC_SCRATCH/_config.sh"
 source "$GC_SCRATCH/_config.sh"
 export SE_INPUT_PATH="$SAVED_SE_INPUT_PATH"
 export SE_OUTPUT_PATH="$SAVED_SE_OUTPUT_PATH"
@@ -213,8 +224,25 @@ if [ -d "$GC_SCRATCH" -a -n "$SB_OUTPUT_FILES" ]; then
 	echo
 fi
 
+# Remove dataset files copied via SRM, if copied together with se output files to scratch directory:
+if [ -n "$DATASET_SRM_FILES" ]; then
+	echo "==========================="
+	echo
+	cd "$GC_SCRATCH"
+	for DATASET_SRM_FILE in $DATASET_SRM_FILES; do
+		if [ -f "$(basename $DATASET_SRM_FILE)" ] ; then
+			echo "Removing $(basename $DATASET_SRM_FILE)"
+			rm "$(basename $DATASET_SRM_FILE)"
+		fi
+	done
+	cd "$GC_LANDINGZONE"
+	echo
+	checkdir "Scratch directory" "$GC_SCRATCH"
+fi
+
 timestamp "SE_OUT" "START"
 export LOG_MD5="$GC_LANDINGZONE/SE.log"
+
 # Copy files to the SE
 if [ $GC_PROCESS_CODE -eq 0 -a -n "$SE_OUTPUT_FILES" ]; then
 	echo "==========================="
@@ -264,7 +292,7 @@ if [ -n "$GC_MONITORING" ]; then
 	export GC_CPUTIME=`cat "$GC_LANDINGZONE/cputime" | awk "$GC_CPUTIMEPARSER"`
 
 	for MON_APP in $GC_MONITORING; do
-		checkfile "$GC_LANDINGZONE/$MON_APP"
+		gc_check_file_exists "$GC_LANDINGZONE/$MON_APP"
 		source "$GC_LANDINGZONE/$MON_APP" "stop"
 	done
 	echo

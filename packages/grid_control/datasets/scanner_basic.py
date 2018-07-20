@@ -1,4 +1,4 @@
-# | Copyright 2010-2016 Karlsruhe Institute of Technology
+# | Copyright 2010-2017 Karlsruhe Institute of Technology
 # |
 # | Licensed under the Apache License, Version 2.0 (the "License");
 # | you may not use this file except in compliance with the License.
@@ -12,263 +12,351 @@
 # | See the License for the specific language governing permissions and
 # | limitations under the License.
 
-import os, sys
-from grid_control import utils
-from grid_control.config import ConfigError, createConfig
+import os, logging
+from grid_control.backends.storage import se_ls
+from grid_control.config import ConfigError, create_config
 from grid_control.datasets import DataProvider, DatasetError
 from grid_control.datasets.scanner_base import InfoScanner
-from grid_control.job_db import Job, JobDB
-from grid_control.job_selector import JobSelector
-from grid_control.utils.parsing import parseStr
-from python_compat import identity, ifilter, imap, irange, izip, lfilter, lmap, reduce, set, sorted
-
-def splitParse(opt):
-	(delim, ds, de) = utils.optSplit(opt, '::')
-	return (delim, parseStr(ds, int), parseStr(de, int))
-
-class NullScanner(InfoScanner):
-	def getEntries(self, path, metadata, events, seList, objStore):
-		yield (path, metadata, events, seList, objStore)
-
-# Get output directories from external config file
-class OutputDirsFromConfig(InfoScanner):
-	def __init__(self, config):
-		InfoScanner.__init__(self, config)
-		newVerbosity = utils.verbosity(utils.verbosity() - 3)
-		ext_config_fn = config.getPath('source config')
-		ext_config = createConfig(ext_config_fn).changeView(setSections = ['global'])
-		self._extWorkDir = ext_config.getWorkPath()
-		self._extWorkflow = ext_config.getPlugin('workflow', 'Workflow:global', cls = 'Workflow',
-			pargs = ('task',))
-		self._extTask = self._extWorkflow.task
-		selector = config.get('source job selector', '')
-		ext_job_db = JobDB(ext_config, jobSelector = lambda jobNum, jobObj: jobObj.state == Job.SUCCESS)
-		self._selected = sorted(ext_job_db.getJobs(JobSelector.create(selector, task = self._extTask)))
-		utils.verbosity(newVerbosity + 3)
-
-	def getEntries(self, path, metadata, events, seList, objStore):
-		for jobNum in self._selected:
-			log = utils.ActivityLog('Reading job logs - [%d / %d]' % (jobNum, self._selected[-1]))
-			metadata['GC_JOBNUM'] = jobNum
-			objStore.update({'GC_TASK': self._extTask, 'GC_WORKDIR': self._extWorkDir})
-			yield (os.path.join(self._extWorkDir, 'output', 'job_%d' % jobNum), metadata, events, seList, objStore)
-			log.finish()
+from grid_control.job_db import JobClass
+from grid_control.job_selector import AndJobSelector, ClassSelector, JobSelector
+from grid_control.utils import DictFormat, clean_path, split_opt
+from grid_control.utils.activity import ProgressActivity
+from grid_control.utils.algos import filter_dict
+from grid_control.utils.parsing import parse_str
+from hpfwk import clear_current_exception
+from python_compat import identity, ifilter, imap, irange, izip, lfilter, lidfilter, lmap, set, sorted  # pylint:disable=line-too-long
 
 
-class OutputDirsFromWork(InfoScanner):
-	def __init__(self, config):
-		InfoScanner.__init__(self, config)
-		self._extWorkDir = config.get('source directory')
-		self._extOutputDir = os.path.join(self._extWorkDir, 'output')
-		self._selector = JobSelector.create(config.get('source job selector', ''))
+class AddFilePrefix(InfoScanner):
+	alias_list = ['prefix']
 
-	def getEntries(self, path, metadata, events, seList, objStore):
-		allDirs = lfilter(lambda fn: fn.startswith('job_'), os.listdir(self._extOutputDir))
-		for idx, dirName in enumerate(allDirs):
-			log = utils.ActivityLog('Reading job logs - [%d / %d]' % (idx, len(allDirs)))
+	def __init__(self, config, datasource_name):
+		InfoScanner.__init__(self, config, datasource_name)
+		self._prefix = config.get('filename prefix', '')
+
+	def _iter_datasource_items(self, item, metadata_dict, entries, location_list, obj_dict):
+		yield (self._prefix + item, metadata_dict, entries, location_list, obj_dict)
+
+
+class DetermineEntries(InfoScanner):
+	alias_list = ['DetermineEvents', 'events']
+
+	def __init__(self, config, datasource_name):
+		InfoScanner.__init__(self, config, datasource_name)
+		self._entries_cmd = config.get(['events command', 'entries command'], '')
+		self._entries_key = config.get(['events key', 'entries key'], '')
+		self._entries_key_scale = config.get_float(['events per key value', 'entries per key value'], 1.)
+		self._entries_default = config.get_int(['events default', 'entries default'], -1)
+
+	def _iter_datasource_items(self, item, metadata_dict, entries, location_list, obj_dict):
+		if (entries is None) or (entries < 0):
+			entries = self._entries_default
+		if self._entries_key:
+			entries_meta = int(metadata_dict.get(self._entries_key, entries))
+			entries = max(1, int(entries_meta * self._entries_key_scale))
+		if self._entries_cmd:
 			try:
-				metadata['GC_JOBNUM'] = int(dirName.split('_')[1])
+				entries = int(os.popen('%s %s' % (self._entries_cmd, item)).readlines()[-1])
 			except Exception:
-				continue
-			objStore['GC_WORKDIR'] = self._extWorkDir
-			log.finish()
-			if self._selector and not self._selector(metadata['GC_JOBNUM'], None):
-				continue
-			elif self._selector is not None:
-				continue
-			yield (os.path.join(self._extOutputDir, dirName), metadata, events, seList, objStore)
+				self._log.log(logging.INFO2, 'Unable to determine entries with %r %r', self._entries_cmd, item)
+				clear_current_exception()
+		yield (item, metadata_dict, entries, location_list, obj_dict)
 
 
-class MetadataFromTask(InfoScanner):
-	def __init__(self, config):
-		InfoScanner.__init__(self, config)
-		ignoreDef = lmap(lambda x: 'SEED_%d' % x, irange(10)) + ['FILE_NAMES',
-			'SB_INPUT_FILES', 'SE_INPUT_FILES', 'SE_INPUT_PATH', 'SE_INPUT_PATTERN',
-			'SB_OUTPUT_FILES', 'SE_OUTPUT_FILES', 'SE_OUTPUT_PATH', 'SE_OUTPUT_PATTERN',
-			'SE_MINFILESIZE', 'DOBREAK', 'MY_RUNTIME', 'GC_RUNTIME', 'MY_JOBID', 'GC_JOB_ID',
-			'GC_VERSION', 'GC_DEPFILES', 'SUBST_FILES', 'SEEDS',
-			'SCRATCH_LL', 'SCRATCH_UL', 'LANDINGZONE_LL', 'LANDINGZONE_UL']
-		self._ignoreVars = config.getList('ignore task vars', ignoreDef)
+class FilesFromDataProvider(InfoScanner):
+	alias_list = ['provider_files']
 
-	def getEntries(self, path, metadata, events, seList, objStore):
-		newVerbosity = utils.verbosity(utils.verbosity() - 3)
-		if 'GC_TASK' in objStore:
-			tmp = dict(objStore['GC_TASK'].getTaskConfig())
-			if 'GC_JOBNUM' in metadata:
-				tmp.update(objStore['GC_TASK'].getJobConfig(metadata['GC_JOBNUM']))
-			for (newKey, oldKey) in objStore['GC_TASK'].getVarMapping().items():
-				tmp[newKey] = tmp.get(oldKey)
-			metadata.update(utils.filterDict(tmp, kF = lambda k: k not in self._ignoreVars))
-		utils.verbosity(newVerbosity + 3)
-		yield (path, metadata, events, seList, objStore)
+	def __init__(self, config, datasource_name):
+		InfoScanner.__init__(self, config, datasource_name)
+		source_dataset_path = config.get('source dataset path')
+		self._source = DataProvider.create_instance('ListProvider', config,
+			'source dataset', source_dataset_path)
 
-
-class FilesFromLS(InfoScanner):
-	def __init__(self, config):
-		InfoScanner.__init__(self, config)
-		self._path = config.get('source directory', '.')
-		self._path = utils.QM('://' in self._path, self._path, utils.cleanPath(self._path))
-
-	def getEntries(self, path, metadata, events, seList, objStore):
-		metadata['GC_SOURCE_DIR'] = self._path
-		counter = 0
-		from grid_control.backends.storage import se_ls
-		proc = se_ls(self._path)
-		for fn in proc.stdout.iter(timeout = 60):
-			log = utils.ActivityLog('Reading source directory - [%d]' % counter)
-			yield (os.path.join(self._path, fn.strip()), metadata, events, seList, objStore)
-			counter += 1
-			log.finish()
-		if proc.status(timeout = 0) != 0:
-			self._log.log_process(proc)
-
-
-class JobInfoFromOutputDir(InfoScanner):
-	def getEntries(self, path, metadata, events, seList, objStore):
-		jobInfoPath = os.path.join(path, 'job.info')
-		try:
-			jobInfo = utils.DictFormat('=').parse(open(jobInfoPath))
-			if jobInfo.get('exitcode') == 0:
-				objStore['JOBINFO'] = jobInfo
-				yield (path, metadata, events, seList, objStore)
-		except Exception:
-			pass
+	def _iter_datasource_items(self, item, metadata_dict, entries, location_list, obj_dict):
+		for block in self._source.get_block_list_cached(show_stats=False):
+			metadata_keys = block.get(DataProvider.Metadata, [])
+			for fi in block[DataProvider.FileList]:
+				metadata_dict['SRC_DATASET'] = block[DataProvider.Dataset]
+				metadata_dict['SRC_BLOCK'] = block[DataProvider.BlockName]
+				metadata_dict.update(dict(izip(metadata_keys, fi.get(DataProvider.Metadata, []))))
+				yield (fi[DataProvider.URL], metadata_dict, fi[DataProvider.NEntries],
+					block[DataProvider.Locations], obj_dict)
 
 
 class FilesFromJobInfo(InfoScanner):
-	def getGuards(self):
+	alias_list = ['jobinfo_files']
+
+	def get_guard_keysets(self):
 		return (['SE_OUTPUT_FILE'], ['SE_OUTPUT_PATH'])
 
-	def getEntries(self, path, metadata, events, seList, objStore):
-		if 'JOBINFO' not in objStore:
-			raise DatasetError('Job information is not filled! Ensure that "JobInfoFromOutputDir" is scheduled!')
+	def _iter_datasource_items(self, item, metadata_dict, entries, location_list, obj_dict):
+		if 'JOBINFO' not in obj_dict:
+			raise DatasetError('Job infos not available! Ensure that "JobInfoFromOutputDir" is selected!')
 		try:
-			jobInfo = objStore['JOBINFO']
-			files = ifilter(lambda x: x[0].startswith('file'), jobInfo.items())
-			fileInfos = imap(lambda x_y: tuple(x_y[1].strip('"').split('  ')), files)
-			for (hashMD5, name_local, name_dest, pathSE) in fileInfos:
-				metadata.update({'SE_OUTPUT_HASH_MD5': hashMD5, 'SE_OUTPUT_FILE': name_local,
-					'SE_OUTPUT_BASE': os.path.splitext(name_local)[0], 'SE_OUTPUT_PATH': pathSE})
-				yield (os.path.join(pathSE, name_dest), metadata, events, seList, objStore)
-		except KeyboardInterrupt:
-			sys.exit(os.EX_TEMPFAIL)
+			job_info_dict = obj_dict['JOBINFO']
+			file_info_str_iter = ifilter(lambda x: x[0].startswith('file'), job_info_dict.items())
+			file_info_tuple_list = imap(lambda x_y: tuple(x_y[1].strip('"').split('  ')), file_info_str_iter)
+			for (file_hash, fn_local, fn_dest, se_path) in file_info_tuple_list:
+				metadata_dict.update({'SE_OUTPUT_HASH_MD5': file_hash, 'SE_OUTPUT_FILE': fn_local,
+					'SE_OUTPUT_BASE': os.path.splitext(fn_local)[0], 'SE_OUTPUT_PATH': se_path})
+				yield (os.path.join(se_path, fn_dest), metadata_dict, entries, location_list, obj_dict)
 		except Exception:
 			raise DatasetError('Unable to read file stageout information!')
 
 
-class FilesFromDataProvider(InfoScanner):
-	def __init__(self, config):
-		InfoScanner.__init__(self, config)
-		dsPath = config.get('source dataset path')
-		self._source = DataProvider.createInstance('ListProvider', config, dsPath)
+class FilesFromLS(InfoScanner):
+	alias_list = ['ls']
 
-	def getEntries(self, path, metadata, events, seList, objStore):
-		for block in self._source.getBlocks():
-			for fi in block[DataProvider.FileList]:
-				metadata.update({'SRC_DATASET': block[DataProvider.Dataset], 'SRC_BLOCK': block[DataProvider.BlockName]})
-				metadata.update(dict(izip(block.get(DataProvider.Metadata, []), fi.get(DataProvider.Metadata, []))))
-				yield (fi[DataProvider.URL], metadata, fi[DataProvider.NEntries], block[DataProvider.Locations], objStore)
+	def __init__(self, config, datasource_name):
+		InfoScanner.__init__(self, config, datasource_name)
+		self._path = config.get('source directory', '.')
+		self._timeout = config.get_int('source timeout', 120)
+		self._trim = config.get_bool('source trim local', True)
+		self._recurse = config.get_bool('source recurse', False)
+		if '://' not in self._path:
+			self._path = 'file://' + self._path
+		(prot, path) = self._path.split('://')
+		self._path = prot + '://' + clean_path(path)
+
+	def _iter_datasource_items(self, item, metadata_dict, entries, location_list, obj_dict):
+		metadata_dict['GC_SOURCE_DIR'] = self._path
+		progress = ProgressActivity('Reading source directory')
+		for counter, size_url in enumerate(self._iter_path(self._path)):
+			progress.update_progress(counter)
+			metadata_dict['FILE_SIZE'] = size_url[0]
+			url = size_url[1]
+			if self._trim:
+				url = url.replace('file://', '')
+			yield (url, metadata_dict, entries, location_list, obj_dict)
+		progress.finish()
+
+	def _iter_path(self, path):
+		proc = se_ls(path)
+		for size_basename in proc.stdout.iter(timeout=self._timeout):
+			(size, basename) = size_basename.strip().split(' ', 1)
+			size = int(size)
+			if size >= 0:
+				yield (size, os.path.join(path, basename))
+			elif self._recurse:
+				for result in self._iter_path(os.path.join(path, basename)):
+					yield result
+		if proc.status(timeout=0) != 0:
+			self._log.log_process(proc)
 
 
-class MatchOnFilename(InfoScanner):
-	def __init__(self, config):
-		InfoScanner.__init__(self, config)
-		self._match = config.getList('filename filter', ['*.root'])
+class JobInfoFromOutputDir(InfoScanner):
+	alias_list = ['dn_jobinfo']
 
-	def getEntries(self, path, metadata, events, seList, objStore):
-		if utils.matchFileName(path, self._match):
-			yield (path, metadata, events, seList, objStore)
-
-
-class AddFilePrefix(InfoScanner):
-	def __init__(self, config):
-		InfoScanner.__init__(self, config)
-		self._prefix = config.get('filename prefix', '')
-
-	def getEntries(self, path, metadata, events, seList, objStore):
-		yield (self._prefix + path, metadata, events, seList, objStore)
+	def _iter_datasource_items(self, item, metadata_dict, entries, location_list, obj_dict):
+		job_info_path = os.path.join(item, 'job.info')
+		try:
+			job_info_dict = DictFormat('=').parse(open(job_info_path))
+			if job_info_dict.get('exitcode') == 0:
+				obj_dict['JOBINFO'] = job_info_dict
+				yield (item, metadata_dict, entries, location_list, obj_dict)
+		except Exception:
+			self._log.log(logging.INFO2, 'Unable to parse job info file %r', job_info_path)
+			clear_current_exception()
 
 
 class MatchDelimeter(InfoScanner):
-	def __init__(self, config):
-		InfoScanner.__init__(self, config)
-		self._matchDelim = config.get('delimeter match', '').split(':')
-		self._delimDS = config.get('delimeter dataset key', '')
-		self._delimB = config.get('delimeter block key', '')
+	alias_list = ['delimeter']
 
-	def getGuards(self):
-		return (utils.QM(self._delimDS, ['DELIMETER_DS'], []), utils.QM(self._delimB, ['DELIMETER_B'], []))
+	def __init__(self, config, datasource_name):
+		InfoScanner.__init__(self, config, datasource_name)
+		# delimeter based selection
+		match_delim_str = config.get('delimeter match', '')
+		self._match_delim = match_delim_str.split(':')
+		self._match_inactive = len(self._match_delim) != 2
+		# delimeter based metadata setup
+		self._setup_arg_list = []
+		self._guard_ds = self._setup('DELIMETER_DS',
+			config.get('delimeter dataset key', ''),
+			config.get('delimeter dataset modifier', ''))
+		self._guard_b = self._setup('DELIMETER_B',
+			config.get('delimeter block key', ''),
+			config.get('delimeter block modifier', ''))
 
-	def getEntries(self, path, metadata, events, seList, objStore):
-		if len(self._matchDelim) == 2:
-			if os.path.basename(path).count(self._matchDelim[0]) != int(self._matchDelim[1]):
-				raise StopIteration
-		def getVar(d, s, e):
-			return str.join(d, os.path.basename(path).split(d)[s:e])
-		if self._delimDS:
-			metadata['DELIMETER_DS'] = getVar(*splitParse(self._delimDS))
-		if self._delimB:
-			metadata['DELIMETER_B'] = getVar(*splitParse(self._delimB))
-		yield (path, metadata, events, seList, objStore)
+	def get_guard_keysets(self):
+		return (self._guard_ds, self._guard_b)
+
+	def _iter_datasource_items(self, item, metadata_dict, entries, location_list, obj_dict):
+		fn_base = os.path.basename(item)
+		if self._match_inactive or fn_base.count(self._match_delim[0]) == int(self._match_delim[1]):
+			for setup in self._setup_arg_list:
+				self._process(item, metadata_dict, *setup)
+			yield (item, metadata_dict, entries, location_list, obj_dict)
+
+	def _process(self, item, metadata_dict, key, delim, delim_start, delim_end, modifier_fun):
+		value = str.join(delim, os.path.basename(item).split(delim)[delim_start:delim_end])
+		try:
+			metadata_dict[key] = str(modifier_fun(value))
+		except Exception:
+			raise DatasetError('Unable to modifiy %s: %r' % (key, value))
+
+	def _setup(self, setup_vn, setup_key, setup_mod):
+		if setup_key:
+			(delim, delim_start_str, delim_end_str) = split_opt(setup_key, '::')
+			modifier = identity
+			if setup_mod and (setup_mod.strip() != 'value'):
+				try:
+					modifier = eval('lambda value: ' + setup_mod)  # pylint:disable=eval-used
+				except Exception:
+					raise ConfigError('Unable to parse delimeter modifier %r' % setup_mod)
+			(delim_start, delim_end) = (parse_str(delim_start_str, int), parse_str(delim_end_str, int))
+			self._setup_arg_list.append((setup_vn, delim, delim_start, delim_end, modifier))
+			return [setup_vn]
+		return []
+
+
+class MatchOnFilename(InfoScanner):
+	alias_list = ['match']
+
+	def __init__(self, config, datasource_name):
+		InfoScanner.__init__(self, config, datasource_name)
+		self._match = config.get_matcher('filename filter', '*.root', default_matcher='ShellStyleMatcher')
+		self._relative = config.get_bool('filename filter relative', True)
+
+	def _iter_datasource_items(self, item, metadata_dict, entries, location_list, obj_dict):
+		fn_match = item
+		if self._relative:
+			fn_match = os.path.basename(item)
+		if self._match.match(fn_match) > 0:
+			yield (item, metadata_dict, entries, location_list, obj_dict)
+
+
+class MetadataFromTask(InfoScanner):
+	alias_list = ['task_metadata']
+
+	def __init__(self, config, datasource_name):
+		InfoScanner.__init__(self, config, datasource_name)
+		ignore_list_default = lmap(lambda x: 'SEED_%d' % x, irange(10)) + ['DOBREAK', 'FILE_NAMES',
+			'GC_DEPFILES', 'GC_JOBID', 'GC_JOBNUM', 'GC_JOB_ID', 'GC_PARAM', 'GC_RUNTIME', 'GC_VERSION',
+			'JOB_RANDOM', 'JOBID', 'LANDINGZONE_LL', 'LANDINGZONE_UL', 'MY_JOB', 'MY_JOBID', 'MY_RUNTIME',
+			'SB_INPUT_FILES', 'SB_OUTPUT_FILES', 'SCRATCH_LL', 'SCRATCH_UL', 'SEEDS',
+			'SE_INPUT_FILES', 'SE_INPUT_PATH', 'SE_INPUT_PATTERN', 'SE_MINFILESIZE',
+			'SE_OUTPUT_FILES', 'SE_OUTPUT_PATH', 'SE_OUTPUT_PATTERN', 'SUBST_FILES']
+		self._ignore_vars = config.get_list('ignore task vars', ignore_list_default)
+
+	def _iter_datasource_items(self, item, metadata_dict, entries, location_list, obj_dict):
+		if ('GC_TASK' in obj_dict) and ('GC_JOBNUM' in metadata_dict):
+			job_env_dict = obj_dict['GC_TASK'].get_job_dict(metadata_dict['GC_JOBNUM'])
+			for (key_new, key_old) in obj_dict['GC_TASK'].get_var_alias_map().items():
+				job_env_dict[key_new] = job_env_dict.get(key_old)
+			metadata_dict.update(filter_dict(job_env_dict, key_filter=lambda k: k not in self._ignore_vars))
+		yield (item, metadata_dict, entries, location_list, obj_dict)
+
+
+class OutputDirsFromConfig(InfoScanner):
+	alias_list = ['config_dn']
+
+	# Get output directories from external config file
+	def __init__(self, config, datasource_name):
+		InfoScanner.__init__(self, config, datasource_name)
+		ext_config_fn = config.get_fn('source config')
+		ext_config_raw = create_config(ext_config_fn, load_only_old_config=True)
+		ext_config = ext_config_raw.change_view(set_sections=['global'])
+		self._ext_work_dn = ext_config.get_work_path()
+		logging.getLogger().disabled = True
+		ext_workflow = ext_config.get_plugin('workflow', 'Workflow:global', cls='Workflow',
+			pkwargs={'backend': 'NullWMS'})
+		logging.getLogger().disabled = False
+		self._ext_task = ext_workflow.task
+		job_selector = JobSelector.create(config.get('source job selector', ''), task=self._ext_task)
+		self._selected = sorted(ext_workflow.job_manager.job_db.get_job_list(AndJobSelector(
+			ClassSelector(JobClass.SUCCESS), job_selector)))
+
+	def _iter_datasource_items(self, item, metadata_dict, entries, location_list, obj_dict):
+		progress_max = None
+		if self._selected:
+			progress_max = self._selected[-1] + 1
+		progress = ProgressActivity('Reading job logs', progress_max)
+		for jobnum in self._selected:
+			progress.update_progress(jobnum)
+			metadata_dict['GC_JOBNUM'] = jobnum
+			obj_dict.update({'GC_TASK': self._ext_task, 'GC_WORKDIR': self._ext_work_dn})
+			job_output_dn = os.path.join(self._ext_work_dn, 'output', 'job_%d' % jobnum)
+			yield (job_output_dn, metadata_dict, entries, location_list, obj_dict)
+		progress.finish()
+
+
+class OutputDirsFromWork(InfoScanner):
+	alias_list = ['work_dn']
+
+	def __init__(self, config, datasource_name):
+		InfoScanner.__init__(self, config, datasource_name)
+		self._ext_work_dn = config.get_dn('source directory')
+		self._ext_output_dir = os.path.join(self._ext_work_dn, 'output')
+		if not os.path.isdir(self._ext_output_dir):
+			raise DatasetError('Unable to find task output directory %s' % repr(self._ext_output_dir))
+		self._selector = JobSelector.create(config.get('source job selector', ''))
+
+	def _iter_datasource_items(self, item, metadata_dict, entries, location_list, obj_dict):
+		dn_list = lfilter(lambda fn: fn.startswith('job_'), os.listdir(self._ext_output_dir))
+		progress = ProgressActivity('Reading job logs', len(dn_list))
+		for idx, dn in enumerate(dn_list):
+			progress.update_progress(idx)
+			try:
+				metadata_dict['GC_JOBNUM'] = int(dn.split('_')[1])
+			except Exception:
+				clear_current_exception()
+				continue
+			obj_dict['GC_WORKDIR'] = self._ext_work_dn
+			if self._selector and not self._selector(metadata_dict['GC_JOBNUM'], None):
+				continue
+			job_output_dn = os.path.join(self._ext_output_dir, dn)
+			yield (job_output_dn, metadata_dict, entries, location_list, obj_dict)
+		progress.finish()
 
 
 class ParentLookup(InfoScanner):
-	def __init__(self, config):
-		InfoScanner.__init__(self, config)
-		self._parentKeys = config.getList('parent keys', [])
-		self._looseMatch = config.getInt('parent match level', 1)
-		self._source = config.get('parent source', '')
-		self._merge = config.getBool('merge parents', False)
-		self._lfnMap = {}
+	alias_list = ['parent']
 
-	def getGuards(self):
-		return ([], utils.QM(self._merge, [], ['PARENT_PATH']))
+	def __init__(self, config, datasource_name):
+		InfoScanner.__init__(self, config, datasource_name)
+		self._parent_source = config.get('parent source', '')
+		self._parent_keys = config.get_list('parent keys', [])
+		self._parent_match_level = config.get_int('parent match level', 1)
+		self._parent_merge = config.get_bool('merge parents', False)
+		# cached "parent lfn parts" (plfnp) to "parent dataset name" (pdn) maps
+		self._plfnp2pdn_cache = {}  # the maps are stored for different parent_dataset_expr
+		self._empty_config = create_config(use_default_files=False, load_old_config=False)
+		self._read_plfnp_map(config, self._parent_source)  # read from configured parent source
 
-	def lfnTrans(self, lfn):
-		if lfn and self._looseMatch: # return looseMatch path elements in reverse order
-			def trunkPath(x, y):
-				return (lambda s: (s[0], os.path.join(x[1], s[1])))(os.path.split(x[0]))
-			return reduce(trunkPath, irange(self._looseMatch), (lfn, ''))[1]
+	def get_guard_keysets(self):
+		if self._parent_merge:
+			return ([], [])
+		return ([], ['PARENT_PATH'])
+
+	def _get_lfnp(self, lfn):  # get lfn parts (lfnp)
+		if lfn and self._parent_match_level:  # return looseMatch path elements in reverse order
+			# /store/local/data/file.root -> file.root (~ML1) | file.root/data/local (~ML3)
+			tmp = lfn.split('/')
+			tmp.reverse()
+			return str.join('/', tmp[:self._parent_match_level])
 		return lfn
 
-	def getEntries(self, path, metadata, events, seList, objStore):
-		datacachePath = os.path.join(objStore.get('GC_WORKDIR', ''), 'datacache.dat')
-		source = utils.QM((self._source == '') and os.path.exists(datacachePath), datacachePath, self._source)
-		if source and (source not in self._lfnMap):
-			pSource = DataProvider.createInstance('ListProvider', createConfig(), source)
-			for (n, fl) in imap(lambda b: (b[DataProvider.Dataset], b[DataProvider.FileList]), pSource.getBlocks()):
-				self._lfnMap.setdefault(source, {}).update(dict(imap(lambda fi: (self.lfnTrans(fi[DataProvider.URL]), n), fl)))
-		pList = set()
-		for key in ifilter(lambda k: k in metadata, self._parentKeys):
-			pList.update(imap(lambda pPath: self._lfnMap.get(source, {}).get(self.lfnTrans(pPath)), metadata[key]))
-		metadata['PARENT_PATH'] = lfilter(identity, pList)
-		yield (path, metadata, events, seList, objStore)
+	def _iter_datasource_items(self, item, metadata_dict, entries, location_list, obj_dict):
+		# if parent source is not defined, try to get datacache from GC_WORKDIR
+		map_plfnp2pdn = dict(self._plfnp2pdn_cache.get(self._parent_source, {}))
+		datacache_fn = os.path.join(obj_dict.get('GC_WORKDIR', ''), 'datacache.dat')
+		if os.path.exists(datacache_fn):  # extend configured parent source with datacache if it exists
+			map_plfnp2pdn.update(self._read_plfnp_map(self._empty_config, datacache_fn))
+		pdn_list = []  # list with parent dataset names
+		for key in ifilter(metadata_dict.__contains__, self._parent_keys):
+			parent_lfn_list = metadata_dict[key]
+			if not isinstance(parent_lfn_list, list):
+				parent_lfn_list = [metadata_dict[key]]
+			for parent_lfn in parent_lfn_list:
+				pdn_list.append(map_plfnp2pdn.get(self._get_lfnp(parent_lfn)))
+		metadata_dict['PARENT_PATH'] = lidfilter(set(pdn_list))
+		yield (item, metadata_dict, entries, location_list, obj_dict)
 
-
-class DetermineEvents(InfoScanner):
-	def __init__(self, config):
-		InfoScanner.__init__(self, config)
-		self._eventsCmd = config.get('events command', '')
-		self._eventsKey = config.get('events key', '')
-		ev_per_kv = parseStr(config.get('events per key value', ''), float, 1)
-		kv_per_ev = parseStr(config.get('key value per events', ''), float, -1)
-		if self._eventsKey:
-			if ev_per_kv * kv_per_ev >= 0: # one is zero or both are negative/positive
-				raise ConfigError('Invalid value for "events per key value" or "key value per events"!')
-			elif ev_per_kv > 0:
-				self._eventsKeyScale = ev_per_kv
-			else:
-				self._eventsKeyScale = 1.0 / kv_per_ev
-		self._eventsDefault = config.getInt('events default', -1)
-
-	def getEntries(self, path, metadata, events, seList, objStore):
-		if (events is None) or (events < 0):
-			events = self._eventsDefault
-		if self._eventsKey:
-			events = max(1, int(int(metadata.get(self._eventsKey, events)) * self._eventsKeyScale))
-		if self._eventsCmd:
-			try:
-				events = int(os.popen('%s %s' % (self._eventsCmd, path)).readlines()[-1])
-			except Exception:
-				pass
-		yield (path, metadata, events, seList, objStore)
+	def _read_plfnp_map(self, config, parent_dataset_expr):
+		if parent_dataset_expr and (parent_dataset_expr not in self._plfnp2pdn_cache):
+			# read parent source and fill lfnMap with parent_lfn_parts -> parent dataset name mapping
+			map_plfnp2pdn = self._plfnp2pdn_cache.setdefault(parent_dataset_expr, {})
+			for block in DataProvider.iter_blocks_from_expr(self._empty_config, parent_dataset_expr):
+				for fi in block[DataProvider.FileList]:
+					map_plfnp2pdn[self._get_lfnp(fi[DataProvider.URL])] = block[DataProvider.Dataset]
+		return self._plfnp2pdn_cache.get(parent_dataset_expr, {})  # return cached mapping
