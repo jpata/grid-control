@@ -431,7 +431,8 @@ class Condor(BasicWMS):
 						len(jobnum_gc_id_list), len(jobnum_list))
 					proc.log_error(self._error_log_fn, jdl=jdl_fn)
 		finally:
-			remove_files([jdl_fn])
+			pass
+			#remove_files([jdl_fn])
 
 		for (jobnum, gc_id) in jobnum_gc_id_list:
 			yield (jobnum, gc_id, {})
@@ -480,6 +481,7 @@ class Condor(BasicWMS):
 			data = self._get_jdl_str_list(jobnum_list, task)
 			safe_write(os.fdopen(jdl_fd, 'w'), data)
 		except Exception:
-			remove_files([jdl_fn])
+			pass
+			#remove_files([jdl_fn])
 			raise BackendError('Could not write jdl data to %s.' % jdl_fn)
 		return jdl_fn
